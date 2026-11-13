@@ -4,7 +4,6 @@ use crate::settings::{Change, Level, Opacity, Settings, Wind};
 use crate::strings::{Language, Strings};
 
 /// Features whose engine side hasn't landed yet show in the menu greyed out.
-const OPACITY_READY: bool = false;
 const SHOW_OVER_FULL_SCREEN_READY: bool = false;
 const UPDATES_READY: bool = false;
 
@@ -67,7 +66,7 @@ pub fn build(settings: &Settings, context: &Context) -> Vec<Item> {
         submenu(text.snowfall, true, choices(&Level::ALL, settings.level, |level| level_label(text, level), Change::Level)),
         submenu(text.wind, true, choices(&Wind::ALL, settings.wind, |wind| wind_label(text, wind), Change::Wind)),
         submenu(text.screens, true, screens(settings, context, text)),
-        submenu(text.opacity, OPACITY_READY, choices(&Opacity::ALL, settings.opacity, |o| format!("{}%", o.percent()), Change::Opacity)),
+        submenu(text.opacity, true, choices(&Opacity::ALL, settings.opacity, |o| format!("{}%", o.percent()), Change::Opacity)),
         command(text.clear_snow, Action::ClearSnow, true),
         Item::Separator,
         toggle(text.behind_windows, behind, Change::BehindWindows, true),

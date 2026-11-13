@@ -278,6 +278,8 @@ pub struct SnowSimulation {
     pace: Pace,
     snowfall: Snowfall,
     density: f32,
+    /// How opaque falling flakes are drawn, from 0 to 1; the snow on the ground and windows stays as it is.
+    opacity: f32,
     pub thaws: bool,
     /// Snow on windows melts as it lands, and the Ground keeps only a thin Pile; apart from `thaws`.
     keeps_windows_clear: bool,
@@ -306,6 +308,7 @@ impl SnowSimulation {
             pace: Pace::Calm,
             snowfall,
             density: 1.0,
+            opacity: 1.0,
             thaws: false,
             keeps_windows_clear: false,
             accumulates: true,
@@ -375,6 +378,11 @@ impl SnowSimulation {
     /// The flakes in the air turn with a new wind over a second or two, as they follow any change of wind.
     pub fn set_wind(&mut self, wind: Wind) {
         self.air.wind = wind;
+    }
+
+    /// How opaque falling flakes are drawn, from 0 to 1. Piles, and the snow thrown up from them, keep their look.
+    pub fn set_opacity(&mut self, opacity: f32) {
+        self.opacity = opacity.clamp(0.0, 1.0);
     }
 
     /// Scales the snowfall; flakes come and go through the usual cycle, so a change shows gradually.
@@ -474,7 +482,7 @@ impl SnowSimulation {
             position: flake.position,
             velocity: flake.velocity,
             size: flake.size,
-            alpha: flake.alpha,
+            alpha: flake.alpha * self.opacity,
             soft: flake.soft,
             tint_amount: flake.tint_amount,
             tint: flake.tint,
