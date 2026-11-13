@@ -382,7 +382,16 @@ fn remove_tray_icon(window: HWND) {
 
 /// The connected displays as the Screens submenu lists them, from left to right.
 fn menu_screens() -> Vec<menu::Screen> {
-    let mut monitors = screen::monitors();
+    let mut monitors = screen::monitors(&screen::display_names());
     monitors.sort_by_key(|monitor| (monitor.bounds.left, monitor.bounds.top));
-    monitors.into_iter().map(|monitor| menu::Screen { id: monitor.id, name: monitor.friendly, primary: monitor.primary }).collect()
+    monitors
+        .into_iter()
+        .map(|monitor| menu::Screen {
+            // Windows numbers its displays as `\.\DISPLAY2` does, and so does its Settings app.
+            number: monitor.name.trim_start_matches(|c: char| !c.is_ascii_digit()).parse().ok(),
+            id: monitor.id,
+            name: monitor.friendly,
+            primary: monitor.primary,
+        })
+        .collect()
 }

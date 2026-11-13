@@ -10,7 +10,7 @@ use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME, DisplayConfigGetDeviceInfo,
     GetDisplayConfigBufferSizes, QDC_ONLY_ACTIVE_PATHS, QueryDisplayConfig,
 };
-use windows::Win32::Foundation::{COLORREF, ERROR_SUCCESS, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWM_TIMING_INFO, DwmGetCompositionTimingInfo};
 use windows::Win32::Graphics::Gdi::{
     DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplayMonitors, EnumDisplaySettingsW, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST,
@@ -73,13 +73,13 @@ pub struct Monitor {
     pub refresh: u32,
 }
 
-pub fn monitors() -> Vec<Monitor> {
+/// The displays now, named from `names`; a display missing from them, as one just plugged in, goes by its GDI name.
+pub fn monitors(names: &Names) -> Vec<Monitor> {
     unsafe extern "system" fn collect(monitor: HMONITOR, _: HDC, _: *mut RECT, list: LPARAM) -> BOOL {
         let list = unsafe { &mut *(list.0 as *mut Vec<HMONITOR>) };
         list.push(monitor);
         true.into()
     }
-    let names = display_names();
     let mut handles: Vec<HMONITOR> = Vec::new();
     unsafe {
         let _ = EnumDisplayMonitors(None, None, Some(collect), LPARAM(&raw mut handles as isize));
@@ -117,18 +117,27 @@ pub fn monitors() -> Vec<Monitor> {
 }
 
 /// Each active display's stable device path and friendly name, by its GDI name.
-fn display_names() -> HashMap<String, (String, Option<String>)> {
+pub type Names = HashMap<String, (String, Option<String>)>;
+
+/// Reads the display configuration: a driver call that can take milliseconds, so it is done when displays change
+/// rather than every frame.
+pub fn display_names() -> Names {
     let mut names = HashMap::new();
     unsafe {
-        let (mut path_count, mut mode_count) = (0, 0);
-        if GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut path_count, &mut mode_count) != ERROR_SUCCESS {
-            return names;
-        }
-        let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); path_count as usize];
-        let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); mode_count as usize];
-        let status = QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &mut path_count, paths.as_mut_ptr(), &mut mode_count, modes.as_mut_ptr(), None);
-        if status != ERROR_SUCCESS {
-            return names;
+        let (mut paths, mut path_count) = (Vec::new(), 0);
+        // The layout can change between asking how much room it needs and reading it; then it is asked again.
+        for _ in 0..3 {
+            let mut mode_count = 0;
+            if GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut path_count, &mut mode_count) != ERROR_SUCCESS {
+                return names;
+            }
+            paths = vec![DISPLAYCONFIG_PATH_INFO::default(); path_count as usize];
+            let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); mode_count as usize];
+            match QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &mut path_count, paths.as_mut_ptr(), &mut mode_count, modes.as_mut_ptr(), None) {
+                ERROR_SUCCESS => break,
+                ERROR_INSUFFICIENT_BUFFER => path_count = 0,
+                _ => return names,
+            }
         }
         for path in &paths[..path_count as usize] {
             let mut source = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
