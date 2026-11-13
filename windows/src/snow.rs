@@ -92,6 +92,9 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
                             screen.wake(now);
                         });
                     }
+                    if settings.wind != previous.wind {
+                        screens.iter_mut().for_each(|screen| screen.simulation.set_wind(settings.wind));
+                    }
                     if settings.melt != previous.melt {
                         screens.iter_mut().for_each(|screen| screen.simulation.thaws = settings.melt);
                     }
@@ -300,6 +303,7 @@ fn new_simulation(monitor: &Monitor, settings: &Settings) -> SnowSimulation {
     let (width, height) = dip_size(monitor);
     let mut simulation = SnowSimulation::new(width as f32, height as f32, settings.level);
     simulation.thaws = settings.melt;
+    simulation.set_wind(settings.wind);
     simulation
 }
 
