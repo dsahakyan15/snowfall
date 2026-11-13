@@ -660,3 +660,30 @@ fn keeping_windows_clear_also_melts_the_snow_of_windows_out_of_sight() {
     // Only the trace of the last flakes still landing.
     assert!(on_window(&simulation) < full * 0.1, "the Pile came back with {} of {full}", on_window(&simulation));
 }
+
+#[test]
+fn opacity_fades_the_falling_flakes_and_leaves_the_piles_be() {
+    let mut simulation = SnowSimulation::new(1280.0, 800.0, Snowfall::Snow);
+    run(&mut simulation, 20.0, AWAY);
+    let snapshot = |simulation: &SnowSimulation| {
+        let mut sprites = vec![Sprite::default(); simulation.sprite_count()];
+        let count = simulation.write_sprites(&mut sprites);
+        sprites.truncate(count);
+        let mut buffer = vec![0.0; simulation.column_count()];
+        simulation.write_layers(&mut buffer);
+        (sprites, buffer)
+    };
+    let (full, piles) = snapshot(&simulation);
+    simulation.set_opacity(0.4);
+    let (faded, faded_piles) = snapshot(&simulation);
+    assert_eq!(full.len(), faded.len());
+    // Flakes fade; the odd grain thrown up from a Pile keeps its look.
+    let mut fading = 0;
+    for (full, faded) in full.iter().zip(&faded) {
+        let scaled = (faded.alpha - full.alpha * 0.4).abs() < 1e-6;
+        assert!(scaled || faded.alpha == full.alpha, "alpha {} at 40% of {}", faded.alpha, full.alpha);
+        fading += scaled as usize;
+    }
+    assert!(fading * 10 >= full.len() * 9, "only {fading} of {} sprites faded", full.len());
+    assert_eq!(piles, faded_piles, "the Piles changed");
+}
