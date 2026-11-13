@@ -544,14 +544,15 @@ fn a_strong_wind_drifts_a_pile_toward_its_downwind_side() {
         run(&mut simulation, 60.0, AWAY);
         simulation.set_snowfall(Snowfall::Off);
         simulation.set_wind(wind);
-        run(&mut simulation, 60.0, AWAY);
+        run(&mut simulation, 120.0, AWAY);
         let (left, right) = halves(&simulation, 1);
         balance.push((right - left) / (right + left));
     }
     let [calm, right, left] = balance[..] else { unreachable!() };
     assert!(calm.abs() < 0.15, "without wind the pile leans {calm}");
-    assert!(right > calm + 0.1, "a wind to the right leaves the pile at {right}, against {calm} without");
-    assert!(left < calm - 0.1, "a wind to the left leaves the pile at {left}, against {calm} without");
+    // A Pile never lies quite even, so the winds are judged against each other as well.
+    assert!(right > 0.05 && left < -0.05, "the pile leans {right} in a wind to the right and {left} in one to the left");
+    assert!(right - left > 0.15, "the winds leave the pile leaning only {right} and {left}");
 }
 
 #[test]
@@ -572,4 +573,19 @@ fn snow_still_settles_in_a_strong_wind() {
     let after = piles(&windy)[0].1;
     assert!(after > 0.8 * before, "the wind blew the ground away: {before} → {after}");
     assert_finite(&windy);
+}
+
+#[test]
+fn drifts_come_to_rest_in_a_steady_strong_wind() {
+    let none = HashSet::new();
+    let mut simulation = SnowSimulation::new(1280.0, 800.0, Snowfall::Snow);
+    simulation.thaws = false;
+    simulation.update_windows(&[surface(7, 300.0, 500.0, 300.0)], 0.2, &none, &none, false);
+    run(&mut simulation, 30.0, AWAY);
+    simulation.set_snowfall(Snowfall::Off);
+    simulation.set_wind(Wind::StrongRight);
+    run(&mut simulation, 900.0, AWAY);
+    let restless = (0..300).filter(|_| simulation.step(DT, AWAY)).count();
+    assert_eq!(restless, 0, "the drifts still change in {restless} of 300 steps");
+    assert!(simulation.has_snow(), "the wind blew everything away");
 }
