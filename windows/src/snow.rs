@@ -93,6 +93,9 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
                             screen.wake(now);
                         });
                     }
+                    if settings.screens_off != previous.screens_off {
+                        screens = sync_screens(&gpu, &settings, screens, layer, false);
+                    }
                     if settings.behind_windows != previous.behind_windows {
                         layer = settings.behind_windows.then(find_layer).flatten();
                         screens = sync_screens(&gpu, &settings, screens, layer, true);
@@ -154,7 +157,7 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
             chores_at = now + clock.frequency;
             clock.refresh();
             // In case a display change went unannounced.
-            let current = monitors();
+            let current: Vec<Monitor> = monitors().into_iter().filter(|monitor| settings.screen_on(&monitor.id)).collect();
             if current.len() != screens.len() || screens.iter().any(|screen| !current.contains(&screen.monitor)) {
                 DISPLAYS_CHANGED.set(true);
             }
@@ -253,7 +256,8 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
 fn sync_screens(gpu: &Gpu, settings: &Settings, mut current: Vec<Screen>, layer: Option<DesktopLayer>, rebuild: bool) -> Vec<Screen> {
     let mut result = Vec::new();
     let displays = monitors();
-    for monitor in displays.iter().cloned() {
+    // Screens the person turned snow off on get no overlay; their snow goes with it.
+    for monitor in displays.iter().filter(|monitor| settings.screen_on(&monitor.id)).cloned() {
         let kept = current.iter().position(|screen| screen.monitor.name == monitor.name);
         let simulation = match kept.map(|i| current.swap_remove(i)) {
             Some(screen) if screen.monitor == monitor && !rebuild && screen.behind_windows() == layer.is_some() => {
@@ -268,7 +272,15 @@ fn sync_screens(gpu: &Gpu, settings: &Settings, mut current: Vec<Screen>, layer:
             }
             None => new_simulation(&monitor, settings),
         };
-        log!("display {}: {:?}, {} dpi, {} Hz", monitor.name, monitor.rect, monitor.dpi, monitor.refresh);
+        log!(
+            "display {} ({}, {}): {:?}, {} dpi, {} Hz",
+            monitor.name,
+            monitor.friendly.as_deref().unwrap_or("unnamed"),
+            monitor.id,
+            monitor.rect,
+            monitor.dpi,
+            monitor.refresh
+        );
         let screen = Screen::new(gpu, monitor.clone(), simulation, settings, layer).or_else(|(error, simulation)| {
             // Snow that can't go behind windows stays on top of them rather than vanishing.
             if layer.is_none() {
