@@ -18,6 +18,12 @@ const THAW_RATE: f32 = 0.02;
 const THAW_TIME: f32 = 30.0;
 const THAW_BALANCE: f32 = 184.0;
 const THAW_EXPONENT: f32 = 0.74;
+/// Keep windows clear: snow on a window melts this fast, with this time constant in seconds, so it never builds.
+const CLEAR_RATE: f32 = 0.5;
+const CLEAR_TIME: f32 = 1.0;
+/// Keep windows clear: the Ground keeps a layer this deep, and what lies above it melts with this time constant.
+const CLEAR_GROUND_DEPTH: f32 = 3.0;
+const CLEAR_GROUND_TIME: f32 = 2.0;
 const DEPOSITION: f32 = 1.1;
 const REPOSE: f32 = 0.8;
 const ROUNDING: f32 = 0.15;
@@ -273,6 +279,8 @@ pub struct SnowSimulation {
     snowfall: Snowfall,
     density: f32,
     pub thaws: bool,
+    /// Snow on windows melts away as it lands, and the Ground keeps only a thin layer; apart from `thaws`.
+    pub keeps_windows_clear: bool,
     pub accumulates: bool,
     /// Side edges, left and right, with no display past them: a window slid past one leaves its snow heaped against the edge.
     pub walls: (bool, bool),
@@ -299,6 +307,7 @@ impl SnowSimulation {
             snowfall,
             density: 1.0,
             thaws: false,
+            keeps_windows_clear: false,
             accumulates: true,
             walls: (false, false),
             layers: vec![ground],
@@ -1013,6 +1022,13 @@ impl SnowSimulation {
                     LEDGE_THAW_DEPTH
                 };
                 if layer.thaw(dt * melt_pace, floor, THAW_RATE, THAW_TIME) {
+                    self.air.heights_changed = true;
+                }
+            }
+            if self.keeps_windows_clear {
+                let cleared =
+                    if li == 0 { layer.thaw(dt, CLEAR_GROUND_DEPTH, 0.0, CLEAR_GROUND_TIME) } else { layer.thaw(dt, 0.0, CLEAR_RATE, CLEAR_TIME) };
+                if cleared {
                     self.air.heights_changed = true;
                 }
             }

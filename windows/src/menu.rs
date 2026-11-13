@@ -6,7 +6,6 @@ use crate::strings::{Language, Strings};
 /// Features whose engine side hasn't landed yet show in the menu greyed out.
 const SCREENS_READY: bool = false;
 const OPACITY_READY: bool = false;
-const KEEP_WINDOWS_CLEAR_READY: bool = false;
 const PAUSE_ON_BATTERY_READY: bool = false;
 const SHOW_OVER_FULL_SCREEN_READY: bool = false;
 const UPDATES_READY: bool = false;
@@ -72,7 +71,7 @@ pub fn build(settings: &Settings, context: &Context) -> Vec<Item> {
         command(text.clear_snow, Action::ClearSnow, true),
         Item::Separator,
         toggle(text.behind_windows, behind, Change::BehindWindows, true),
-        toggle(text.keep_windows_clear, settings.keep_windows_clear, Change::KeepWindowsClear, KEEP_WINDOWS_CLEAR_READY),
+        toggle(text.keep_windows_clear, settings.keep_windows_clear, Change::KeepWindowsClear, true),
         toggle(text.melt, settings.melt, Change::Melt, true),
         toggle(text.pause_on_battery, settings.pause_on_battery, Change::PauseOnBattery, PAUSE_ON_BATTERY_READY),
         toggle(text.show_over_full_screen, settings.show_over_full_screen, Change::ShowOverFullScreen, SHOW_OVER_FULL_SCREEN_READY && !behind),

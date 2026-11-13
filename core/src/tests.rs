@@ -589,3 +589,52 @@ fn drifts_come_to_rest_in_a_steady_strong_wind() {
     assert_eq!(restless, 0, "the drifts still change in {restless} of 300 steps");
     assert!(simulation.has_snow(), "the wind blew everything away");
 }
+
+/// Snow area on a window's ledge, the layer after the Ground; none once it has melted, as an empty layer isn't drawn.
+fn on_window(simulation: &SnowSimulation) -> f32 {
+    piles(simulation).get(1).map_or(0.0, |pile| pile.1)
+}
+
+#[test]
+fn keeping_windows_clear_leaves_only_a_trace_on_a_window_in_heavy_snow() {
+    let none = HashSet::new();
+    let mut simulation = SnowSimulation::new(1280.0, 800.0, Snowfall::HeavySnow);
+    simulation.keeps_windows_clear = true;
+    simulation.update_windows(&[surface(7, 300.0, 500.0, 600.0)], 0.2, &none, &none, false);
+    let mut thickest: f32 = 0.0;
+    for _ in 0..120 {
+        run(&mut simulation, 1.0, AWAY);
+        thickest = thickest.max(on_window(&simulation) / 600.0);
+    }
+    // Flakes still land, each melting within a second or so; a Pile here would reach 14 deep.
+    assert!(thickest < 1.5, "snow on the window averaged up to {thickest} deep");
+}
+
+#[test]
+fn keeping_windows_clear_keeps_a_thin_layer_on_the_ground_that_stops_growing() {
+    let mut simulation = SnowSimulation::new(1280.0, 800.0, Snowfall::HeavySnow);
+    simulation.keeps_windows_clear = true;
+    run(&mut simulation, 60.0, AWAY);
+    let early = piles(&simulation)[0].1 / 1280.0;
+    run(&mut simulation, 120.0, AWAY);
+    let late = piles(&simulation)[0].1 / 1280.0;
+    assert!(late > 1.0, "no layer kept on the ground: {late} deep on average");
+    assert!(late < 6.0, "the ground's layer is {late} deep on average");
+    assert!(late < early * 1.15, "the ground's layer keeps growing: {early} → {late} deep");
+}
+
+#[test]
+fn keeping_windows_clear_melts_snow_already_on_windows_within_seconds() {
+    let none = HashSet::new();
+    let mut simulation = SnowSimulation::new(1280.0, 800.0, Snowfall::HeavySnow);
+    simulation.update_windows(&[surface(7, 300.0, 500.0, 600.0)], 0.2, &none, &none, false);
+    run(&mut simulation, 60.0, AWAY);
+    let before = on_window(&simulation) / 600.0;
+    assert!(before > 5.0, "the window gathered only {before} deep");
+    simulation.keeps_windows_clear = true;
+    run(&mut simulation, 5.0, AWAY);
+    // Down to the trace the falling snow leaves.
+    let after = on_window(&simulation) / 600.0;
+    assert!(after < 1.5, "the window still holds {after} deep, from {before}");
+    assert_finite(&simulation);
+}
