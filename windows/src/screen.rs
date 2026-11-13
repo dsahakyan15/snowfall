@@ -36,6 +36,9 @@ use crate::settings::Settings;
 use crate::tracker::{COVER_ONLY, Tracker, class_name, cloaked, process_name};
 
 const CLASS: PCWSTR = w!("SnowfallOverlay");
+/// How long the snow takes to fade out under a full-screen app, and back in after, in seconds.
+pub const FADE_OUT: f64 = 0.25;
+const FADE_IN: f64 = 0.35;
 
 thread_local! {
     /// Set by an overlay window when the displays change under it.
@@ -289,6 +292,8 @@ pub struct Screen {
     windows_seen: u64,
     windows_changed_at: i64,
     covered: bool,
+    /// Whether the fade out under a full-screen app is over, and the overlay hidden.
+    faded_out: bool,
     /// Hidden and still while Pause on battery stops the snow.
     paused: bool,
     backdrop: Option<Backdrop>,
@@ -326,6 +331,7 @@ impl Screen {
             windows_changed_at: 0,
             covered: false,
             paused: false,
+            faded_out: false,
             backdrop: None,
             shadow_tint: [0.0; 4],
             layer,
@@ -405,12 +411,29 @@ impl Screen {
         self.windows_changed_at = now;
     }
 
-    /// Hides the snow while a full-screen app covers the display, and stops it, as it stops over a full-screen app on a Mac.
-    pub fn set_covered(&mut self, covered: bool) {
-        if covered != self.covered {
-            self.covered = covered;
+    /// While a full-screen app covers the display the snow stops and fades out, as it does over a full-screen app on
+    /// a Mac; once uncovered it fades back in where it was.
+    pub fn set_covered(&mut self, gpu: &Gpu, covered: bool) {
+        if covered == self.covered {
+            return;
+        }
+        self.covered = covered;
+        self.faded_out = false;
+        let (from, to, seconds) = if covered { (1.0, 0.0, FADE_OUT) } else { (0.0, 1.0, FADE_IN) };
+        if let Err(error) = self.surface.fade(gpu, from, to, seconds) {
+            log!("fade failed: {error}");
+        }
+        self.show();
+    }
+
+    /// Once the fade out is over, hides the overlay, so the compositor has nothing left to do for it. Returns when to
+    /// look again.
+    pub fn finish_fade(&mut self, now: i64, clock: &Clock) -> i64 {
+        if !self.faded_out && self.covered {
+            self.faded_out = true;
             self.show();
         }
+        now + clock.frequency / 4
     }
 
     /// Hides the snow and stops it while Pause on battery holds it, and brings it back where it was.
@@ -421,13 +444,14 @@ impl Screen {
         }
     }
 
-    /// Shows the overlay unless a full-screen app covers it or the snow is paused; shown again, it picks up from now.
+    /// Shows the overlay unless it has faded out under a full-screen app or the snow is paused; shown again, it picks
+    /// up from now.
     fn show(&mut self) {
-        let hidden = self.covered || self.paused;
+        let hidden = self.paused || self.faded_out;
         unsafe {
             let _ = ShowWindow(self.overlay.0, if hidden { SW_HIDE } else { SW_SHOWNOACTIVATE });
         }
-        if !hidden {
+        if !hidden && !self.covered {
             self.resume();
         }
     }

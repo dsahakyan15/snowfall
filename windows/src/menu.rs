@@ -4,7 +4,6 @@ use crate::settings::{Change, Level, Opacity, Settings, Wind};
 use crate::strings::{Language, Strings};
 
 /// Features whose engine side hasn't landed yet show in the menu greyed out.
-const SHOW_OVER_FULL_SCREEN_READY: bool = false;
 const UPDATES_READY: bool = false;
 
 /// What choosing a menu item does.
@@ -73,7 +72,7 @@ pub fn build(settings: &Settings, context: &Context) -> Vec<Item> {
         toggle(text.keep_windows_clear, settings.keep_windows_clear, Change::KeepWindowsClear, true),
         toggle(text.melt, settings.melt, Change::Melt, true),
         toggle(text.pause_on_battery, settings.pause_on_battery, Change::PauseOnBattery, true),
-        toggle(text.show_over_full_screen, settings.show_over_full_screen, Change::ShowOverFullScreen, SHOW_OVER_FULL_SCREEN_READY && !behind),
+        toggle(text.show_over_full_screen, settings.show_over_full_screen, Change::ShowOverFullScreen, !behind),
         // Behind windows, the snow is in the desktop's own layer, which Windows can't keep out of screenshots.
         if behind {
             Item::Command {
