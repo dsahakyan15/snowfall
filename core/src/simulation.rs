@@ -61,8 +61,9 @@ const SLIDE_CALM: f32 = 0.35;
 pub enum Snowfall {
     /// Nothing new falls; what is already in the air finishes falling.
     Off,
+    /// A steady snowfall: the default.
     Snow,
-    /// A blizzard.
+    /// A blizzard, about three times as dense as Snow.
     HeavySnow,
 }
 
@@ -73,7 +74,7 @@ impl Snowfall {
         match self {
             Snowfall::Off => 0.0,
             Snowfall::Snow => 380.0,
-            Snowfall::HeavySnow => 1500.0,
+            Snowfall::HeavySnow => 1200.0,
         }
     }
 }

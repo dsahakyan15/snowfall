@@ -80,7 +80,7 @@ fn heavy_snow_keeps_far_more_flakes_in_the_air_than_snow() {
 fn on_screen(simulation: &SnowSimulation) -> usize {
     let mut sprites = vec![Sprite::default(); simulation.sprite_count()];
     let count = simulation.write_sprites(&mut sprites);
-    sprites[..count].iter().filter(|sprite| sprite.position.y <= simulation.height()).count()
+    sprites[..count].iter().filter(|sprite| sprite.position.y - sprite.size <= simulation.height()).count()
 }
 
 #[test]
@@ -422,6 +422,10 @@ fn survives_a_long_chaotic_session() {
         if frame % 5000 == 0 {
             simulation.thaws = !simulation.thaws;
             simulation.accumulates = frame % 15000 != 0;
+        }
+        // The level changes now and then, in the middle of everything else.
+        if frame % 3000 == 1500 {
+            simulation.set_snowfall(Snowfall::ALL[(next() * 3.0) as usize % 3]);
         }
         if frame == 20_000 {
             simulation.resize(1280.0, 720.0);
