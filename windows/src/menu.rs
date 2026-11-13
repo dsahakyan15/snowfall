@@ -4,7 +4,6 @@ use crate::settings::{Change, Level, Opacity, Settings, Wind};
 use crate::strings::{Language, Strings};
 
 /// Features whose engine side hasn't landed yet show in the menu greyed out.
-const SCREENS_READY: bool = false;
 const OPACITY_READY: bool = false;
 const PAUSE_ON_BATTERY_READY: bool = false;
 const SHOW_OVER_FULL_SCREEN_READY: bool = false;
@@ -45,6 +44,8 @@ pub struct Screen {
     /// Its friendly name, when it has one.
     pub name: Option<String>,
     pub primary: bool,
+    /// The number Windows gives it, for a screen without a name.
+    pub number: Option<usize>,
 }
 
 pub struct Context<'a> {
@@ -66,7 +67,7 @@ pub fn build(settings: &Settings, context: &Context) -> Vec<Item> {
     vec![
         submenu(text.snowfall, true, choices(&Level::ALL, settings.level, |level| level_label(text, level), Change::Level)),
         submenu(text.wind, true, choices(&Wind::ALL, settings.wind, |wind| wind_label(text, wind), Change::Wind)),
-        submenu(text.screens, SCREENS_READY, screens(settings, context, text)),
+        submenu(text.screens, true, screens(settings, context, text)),
         submenu(text.opacity, OPACITY_READY, choices(&Opacity::ALL, settings.opacity, |o| format!("{}%", o.percent()), Change::Opacity)),
         command(text.clear_snow, Action::ClearSnow, true),
         Item::Separator,
@@ -121,7 +122,8 @@ fn screens(settings: &Settings, context: &Context, text: &Strings) -> Vec<Item> 
         .iter()
         .enumerate()
         .map(|(i, screen)| {
-            let name = screen.name.clone().unwrap_or_else(|| text.screen.replace("{n}", &(i + 1).to_string()));
+            let number = screen.number.unwrap_or(i + 1);
+            let name = screen.name.clone().unwrap_or_else(|| text.screen.replace("{n}", &number.to_string()));
             let label = if screen.primary { format!("{name} {}", text.primary) } else { name };
             let on = settings.screen_on(&screen.id);
             Item::Command { label, action: Action::Change(Change::Screen(screen.id.clone(), !on)), checked: on, radio: false, enabled: true }
@@ -266,14 +268,17 @@ mod tests {
 
     #[test]
     fn screens_are_listed_by_name_or_number_and_checked_unless_turned_off() {
-        let screens =
-            [Screen { id: "a".into(), name: Some("DELL U2720Q".into()), primary: true }, Screen { id: "b".into(), name: None, primary: false }];
+        let screens = [
+            Screen { id: "a".into(), name: Some("DELL U2720Q".into()), primary: true, number: Some(1) },
+            // Windows calls it Display 3, though it is second from the left.
+            Screen { id: "b".into(), name: None, primary: false, number: Some(3) },
+        ];
         let mut settings = Settings::default();
         settings.apply(&Change::Screen("b".into(), false));
         let menu = build(&settings, &Context { language: Language::English, version: "1", screens: &screens });
         assert!(state(find(&menu, "DELL U2720Q (primary)")).0);
-        assert!(!state(find(&menu, "Screen 2")).0);
-        let Item::Command { action, .. } = find(&menu, "Screen 2") else { panic!() };
+        assert!(!state(find(&menu, "Screen 3")).0);
+        let Item::Command { action, .. } = find(&menu, "Screen 3") else { panic!() };
         assert_eq!(action, &Action::Change(Change::Screen("b".into(), true)));
     }
 }

@@ -1,11 +1,16 @@
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::sync::Once;
 use std::sync::atomic::{AtomicIsize, Ordering};
 
-use windows::Win32::Foundation::{COLORREF, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Devices::Display::{
+    DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_MODE_INFO,
+    DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME, DisplayConfigGetDeviceInfo,
+    GetDisplayConfigBufferSizes, QDC_ONLY_ACTIVE_PATHS, QueryDisplayConfig,
+};
+use windows::Win32::Foundation::{COLORREF, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWM_TIMING_INFO, DwmGetCompositionTimingInfo};
 use windows::Win32::Graphics::Gdi::{
     DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplayMonitors, EnumDisplaySettingsW, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST,
@@ -52,7 +57,13 @@ pub enum PowerBudget {
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Monitor {
+    /// The display's GDI name, such as `\\.\DISPLAY1`: what Windows calls it now, which can change as displays come and go.
     pub name: String,
+    /// What stays the same for this monitor on this port across replugging and restarts: its device path.
+    pub id: String,
+    /// The name the monitor gives itself, such as "DELL U2720Q", when it gives one.
+    pub friendly: Option<String>,
+    pub primary: bool,
     /// The work area in physical pixels: the taskbar is the ground the snow settles on, so it is left out.
     /// An auto-hidden taskbar takes no work area, and the snow settles at the bottom of the display.
     pub rect: RECT,
@@ -62,7 +73,8 @@ pub struct Monitor {
     pub refresh: u32,
 }
 
-pub fn monitors() -> Vec<Monitor> {
+/// The displays now, named from `names`; a display missing from them, as one just plugged in, goes by its GDI name.
+pub fn monitors(names: &Names) -> Vec<Monitor> {
     unsafe extern "system" fn collect(monitor: HMONITOR, _: HDC, _: *mut RECT, list: LPARAM) -> BOOL {
         let list = unsafe { &mut *(list.0 as *mut Vec<HMONITOR>) };
         list.push(monitor);
@@ -88,9 +100,13 @@ pub fn monitors() -> Vec<Monitor> {
             } else {
                 60
             };
-            let length = info.szDevice.iter().position(|&c| c == 0).unwrap_or(info.szDevice.len());
+            let name = wide(&info.szDevice);
+            let (id, friendly) = names.get(&name).cloned().unwrap_or_else(|| (name.clone(), None));
             Some(Monitor {
-                name: String::from_utf16_lossy(&info.szDevice[..length]),
+                name,
+                id,
+                friendly,
+                primary: info.monitorInfo.dwFlags & MONITORINFOF_PRIMARY != 0,
                 rect: info.monitorInfo.rcWork,
                 bounds: info.monitorInfo.rcMonitor,
                 dpi,
@@ -98,6 +114,69 @@ pub fn monitors() -> Vec<Monitor> {
             })
         })
         .collect()
+}
+
+/// Each active display's stable device path and friendly name, by its GDI name.
+pub type Names = HashMap<String, (String, Option<String>)>;
+
+/// Reads the display configuration: a driver call that can take milliseconds, so it is done when displays change
+/// rather than every frame.
+pub fn display_names() -> Names {
+    let mut names = HashMap::new();
+    unsafe {
+        let (mut paths, mut path_count) = (Vec::new(), 0);
+        // The layout can change between asking how much room it needs and reading it; then it is asked again.
+        for _ in 0..3 {
+            let mut mode_count = 0;
+            if GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut path_count, &mut mode_count) != ERROR_SUCCESS {
+                return names;
+            }
+            paths = vec![DISPLAYCONFIG_PATH_INFO::default(); path_count as usize];
+            let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); mode_count as usize];
+            match QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &mut path_count, paths.as_mut_ptr(), &mut mode_count, modes.as_mut_ptr(), None) {
+                ERROR_SUCCESS => break,
+                ERROR_INSUFFICIENT_BUFFER => path_count = 0,
+                _ => return names,
+            }
+        }
+        for path in &paths[..path_count as usize] {
+            let mut source = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
+                header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                    r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+                    size: size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
+                    adapterId: path.sourceInfo.adapterId,
+                    id: path.sourceInfo.id,
+                },
+                ..Default::default()
+            };
+            let mut target = DISPLAYCONFIG_TARGET_DEVICE_NAME {
+                header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                    r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+                    size: size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32,
+                    adapterId: path.targetInfo.adapterId,
+                    id: path.targetInfo.id,
+                },
+                ..Default::default()
+            };
+            if DisplayConfigGetDeviceInfo(&mut source.header) != 0 || DisplayConfigGetDeviceInfo(&mut target.header) != 0 {
+                continue;
+            }
+            let device_path = wide(&target.monitorDevicePath);
+            if device_path.is_empty() {
+                continue;
+            }
+            let friendly = Some(wide(&target.monitorFriendlyDeviceName)).filter(|name| !name.is_empty());
+            // A display mirrored to several monitors keeps the first.
+            names.entry(wide(&source.viewGdiDeviceName)).or_insert((device_path, friendly));
+        }
+    }
+    names
+}
+
+/// A NUL-terminated UTF-16 buffer as a string.
+fn wide(buffer: &[u16]) -> String {
+    let length = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
+    String::from_utf16_lossy(&buffer[..length])
 }
 
 /// Which side edges of a display's work area, left and right, have no display past them, so snow heaps up against them.

@@ -25,6 +25,7 @@ use windows::core::{HSTRING, PCWSTR, Result, w};
 use crate::log;
 use crate::menu::{self, Action, Context, Item};
 use crate::registry::{self, Registry};
+use crate::screen;
 use crate::settings::{Change, Settings};
 use crate::snow::{self, Command, Links};
 use crate::strings::Language;
@@ -208,7 +209,8 @@ fn send(app: &App, command: Command) {
 fn show_menu(window: HWND, x: i32, y: i32) {
     let Some(settings) = APP.with_borrow(|app| app.as_ref().map(|app| app.settings.clone())) else { return };
     let language = Language::from_langid(unsafe { GetUserDefaultUILanguage() });
-    let items = menu::build(&settings, &Context { language, version: env!("CARGO_PKG_VERSION"), screens: &[] });
+    let screens = menu_screens();
+    let items = menu::build(&settings, &Context { language, version: env!("CARGO_PKG_VERSION"), screens: &screens });
     let mut actions = Vec::new();
     let chosen = unsafe {
         let Some(menu) = native_menu(&items, &mut actions) else { return };
@@ -376,4 +378,20 @@ fn remove_tray_icon(window: HWND) {
     unsafe {
         let _ = Shell_NotifyIconW(NIM_DELETE, &data);
     }
+}
+
+/// The connected displays as the Screens submenu lists them, from left to right.
+fn menu_screens() -> Vec<menu::Screen> {
+    let mut monitors = screen::monitors(&screen::display_names());
+    monitors.sort_by_key(|monitor| (monitor.bounds.left, monitor.bounds.top));
+    monitors
+        .into_iter()
+        .map(|monitor| menu::Screen {
+            // Windows numbers its displays as `\.\DISPLAY2` does, and so does its Settings app.
+            number: monitor.name.trim_start_matches(|c: char| !c.is_ascii_digit()).parse().ok(),
+            id: monitor.id,
+            name: monitor.friendly,
+            primary: monitor.primary,
+        })
+        .collect()
 }

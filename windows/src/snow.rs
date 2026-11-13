@@ -19,7 +19,9 @@ use crate::desktop::{self, DesktopLayer};
 use crate::light::{Sky, Wallpapers};
 use crate::log;
 use crate::render::Gpu;
-use crate::screen::{BACKDROP_CHANGED, Clock, DISPLAYS_CHANGED, Monitor, PowerBudget, Screen, dip_size, listen, monitors, walls, watch_taskbar};
+use crate::screen::{
+    BACKDROP_CHANGED, Clock, DISPLAYS_CHANGED, Monitor, Names, PowerBudget, Screen, dip_size, display_names, listen, monitors, walls, watch_taskbar,
+};
 use crate::settings::Settings;
 use crate::tracker::{self, Tracker};
 
@@ -58,7 +60,8 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
     log!("adapter: {}", gpu.adapter);
     let _listener = listen()?;
     let mut layer = settings.behind_windows.then(find_layer).flatten();
-    let mut screens = sync_screens(&gpu, &settings, Vec::new(), layer, false);
+    let mut names = Names::new();
+    let mut screens = sync_screens(&gpu, &settings, &mut names, Vec::new(), layer, false);
     let timer = unsafe {
         CreateWaitableTimerExW(None, PCWSTR::null(), CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS.0)
             .or_else(|_| CreateWaitableTimerW(None, false, PCWSTR::null()))?
@@ -93,9 +96,12 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
                             screen.wake(now);
                         });
                     }
+                    // Moving behind windows or back rebuilds every overlay; screens turned on or off only add or remove some.
                     if settings.behind_windows != previous.behind_windows {
                         layer = settings.behind_windows.then(find_layer).flatten();
-                        screens = sync_screens(&gpu, &settings, screens, layer, true);
+                        screens = sync_screens(&gpu, &settings, &mut names, screens, layer, true);
+                    } else if settings.screens_off != previous.screens_off {
+                        screens = sync_screens(&gpu, &settings, &mut names, screens, layer, false);
                     }
                     if settings.show_in_screenshots != previous.show_in_screenshots {
                         screens.iter().for_each(|screen| screen.show_in_screenshots(settings.show_in_screenshots));
@@ -104,7 +110,7 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
                 Command::ShellRestarted => {
                     if settings.behind_windows {
                         layer = find_layer();
-                        screens = sync_screens(&gpu, &settings, screens, layer, true);
+                        screens = sync_screens(&gpu, &settings, &mut names, screens, layer, true);
                     }
                 }
                 Command::ClearSnow(calm) => {
@@ -142,7 +148,7 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
             if settings.behind_windows {
                 layer = find_layer();
             }
-            screens = sync_screens(&gpu, &settings, screens, layer, false);
+            screens = sync_screens(&gpu, &settings, &mut names, screens, layer, false);
             clock.refresh();
             light_at = 0;
         }
@@ -154,7 +160,7 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
             chores_at = now + clock.frequency;
             clock.refresh();
             // In case a display change went unannounced.
-            let current = monitors();
+            let current = snowy_monitors(&names, &settings);
             if current.len() != screens.len() || screens.iter().any(|screen| !current.contains(&screen.monitor)) {
                 DISPLAYS_CHANGED.set(true);
             }
@@ -172,7 +178,7 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
                 let found = find_layer();
                 if found.is_some() || screens.iter().any(|screen| !screen.alive()) {
                     layer = found;
-                    screens = sync_screens(&gpu, &settings, screens, layer, true);
+                    screens = sync_screens(&gpu, &settings, &mut names, screens, layer, true);
                 }
             }
             // Wallpaper apps share the layer the snow goes into; how they settle around it tells what went wrong.
@@ -226,7 +232,7 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
             if lost {
                 screens.clear();
                 gpu = Gpu::new()?;
-                screens = sync_screens(&gpu, &settings, Vec::new(), layer, false);
+                screens = sync_screens(&gpu, &settings, &mut names, Vec::new(), layer, false);
             }
             now = Clock::now();
             stats.report(&clock, now, &mut tracker);
@@ -250,9 +256,18 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
 /// One overlay per display: new displays get snow, removed ones lose theirs, and a display that changed
 /// size keeps its snow in a fresh overlay. `rebuild` gives every display a fresh overlay, as when the snow
 /// moves behind windows or back.
-fn sync_screens(gpu: &Gpu, settings: &Settings, mut current: Vec<Screen>, layer: Option<DesktopLayer>, rebuild: bool) -> Vec<Screen> {
+fn sync_screens(
+    gpu: &Gpu,
+    settings: &Settings,
+    names: &mut Names,
+    mut current: Vec<Screen>,
+    layer: Option<DesktopLayer>,
+    rebuild: bool,
+) -> Vec<Screen> {
     let mut result = Vec::new();
-    let displays = monitors();
+    *names = display_names();
+    let displays = snowy_monitors(names, settings);
+
     for monitor in displays.iter().cloned() {
         let kept = current.iter().position(|screen| screen.monitor.name == monitor.name);
         let simulation = match kept.map(|i| current.swap_remove(i)) {
@@ -268,7 +283,15 @@ fn sync_screens(gpu: &Gpu, settings: &Settings, mut current: Vec<Screen>, layer:
             }
             None => new_simulation(&monitor, settings),
         };
-        log!("display {}: {:?}, {} dpi, {} Hz", monitor.name, monitor.rect, monitor.dpi, monitor.refresh);
+        log!(
+            "display {} ({}, {}): {:?}, {} dpi, {} Hz",
+            monitor.name,
+            monitor.friendly.as_deref().unwrap_or("unnamed"),
+            monitor.id,
+            monitor.rect,
+            monitor.dpi,
+            monitor.refresh
+        );
         let screen = Screen::new(gpu, monitor.clone(), simulation, settings, layer).or_else(|(error, simulation)| {
             // Snow that can't go behind windows stays on top of them rather than vanishing.
             if layer.is_none() {
@@ -286,6 +309,12 @@ fn sync_screens(gpu: &Gpu, settings: &Settings, mut current: Vec<Screen>, layer:
         screen.simulation.walls = walls(&screen.monitor, &displays);
     }
     result
+}
+
+/// The displays that get snow: all but those the person turned it off on. A screen turned off gets no overlay and
+/// its snow goes with it; to the screens beside it, it is no neighbour, so their snow heaps against that edge.
+fn snowy_monitors(names: &Names, settings: &Settings) -> Vec<Monitor> {
+    monitors(names).into_iter().filter(|monitor| settings.screen_on(&monitor.id)).collect()
 }
 
 fn find_layer() -> Option<DesktopLayer> {
