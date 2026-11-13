@@ -261,6 +261,11 @@ impl SnowLayer {
         total
     }
 
+    /// Whether the cursor holds column `i` up.
+    pub fn held(&self, i: usize) -> bool {
+        self.supported[i]
+    }
+
     /// Columns touching the cursor are held up by it, so their walls don't slump into the hole until it leaves.
     pub fn hold(&mut self, i: usize) {
         self.supported[i] = true;

@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::geometry::{Rect, V2};
-use crate::simulation::{Pace, SnowSimulation, Snowfall, Sprite, WindowSurface};
+use crate::simulation::{Pace, SnowSimulation, Snowfall, Sprite, Wind, WindowSurface};
 
 const DT: f32 = 1.0 / 60.0;
 const AWAY: V2 = V2::new(-10_000.0, -10_000.0);
@@ -489,4 +489,103 @@ fn snow_pouring_off_a_window_heaps_up_no_higher_than_it_pours_from() {
         .map(|i| lower.origin.y + buffer[lower.offset + i])
         .fold(f32::MIN, f32::max);
     assert!(peak <= pours + 3.0, "the heap under the window's end rose to {peak}, above where the snow pours from at {pours}");
+}
+
+/// The mean sideways speed of everything in the air over `seconds`: positive to the right.
+fn drift(simulation: &mut SnowSimulation, seconds: f32) -> f32 {
+    let (mut sum, mut count) = (0.0, 0usize);
+    let mut sprites = Vec::new();
+    for _ in 0..(seconds / DT) as usize {
+        simulation.step(DT, AWAY);
+        sprites.resize(simulation.sprite_count(), Sprite::default());
+        let written = simulation.write_sprites(&mut sprites);
+        sum += sprites[..written].iter().map(|sprite| sprite.velocity.x).sum::<f32>();
+        count += written;
+    }
+    sum / count.max(1) as f32
+}
+
+#[test]
+fn wind_carries_the_flakes_its_way_and_no_wind_leaves_them_be() {
+    let mut drifts = Vec::new();
+    for wind in [Wind::None, Wind::LightRight, Wind::StrongRight, Wind::StrongLeft] {
+        let mut simulation = SnowSimulation::new(1280.0, 800.0, Snowfall::Snow);
+        simulation.set_wind(wind);
+        run(&mut simulation, 5.0, AWAY);
+        drifts.push(drift(&mut simulation, 90.0));
+    }
+    let [none, light, strong_right, strong_left] = drifts[..] else { unreachable!() };
+    assert!(none.abs() < 10.0, "no wind still drifts {none}");
+    assert!(light > 15.0, "light → drifts {light}");
+    assert!(strong_right > 2.0 * light, "strong → drifts {strong_right}, light {light}");
+    assert!(strong_left < -2.0 * light, "strong ← drifts {strong_left}");
+}
+
+/// Snow area on each half of a window's ledge: left, then right.
+fn halves(simulation: &SnowSimulation, layer: usize) -> (f32, f32) {
+    let mut buffer = vec![0.0; simulation.column_count()];
+    let layers = simulation.write_layers(&mut buffer);
+    let pile = &layers[layer];
+    let (surface, bed) = buffer[pile.offset..pile.offset + 2 * pile.count].split_at(pile.count);
+    let depths: Vec<f32> = surface.iter().zip(bed).map(|(s, b)| s - b).collect();
+    let (left, right) = depths.split_at(depths.len() / 2);
+    (left.iter().sum(), right.iter().sum())
+}
+
+#[test]
+fn a_strong_wind_drifts_a_pile_toward_its_downwind_side() {
+    let none = HashSet::new();
+    let window = [surface(7, 300.0, 500.0, 600.0)];
+    let mut balance = Vec::new();
+    for wind in [Wind::None, Wind::StrongRight, Wind::StrongLeft] {
+        let mut simulation = SnowSimulation::new(1280.0, 800.0, Snowfall::HeavySnow);
+        simulation.thaws = false;
+        simulation.update_windows(&window, 0.2, &none, &none, false);
+        run(&mut simulation, 60.0, AWAY);
+        simulation.set_snowfall(Snowfall::Off);
+        simulation.set_wind(wind);
+        run(&mut simulation, 120.0, AWAY);
+        let (left, right) = halves(&simulation, 1);
+        balance.push((right - left) / (right + left));
+    }
+    let [calm, right, left] = balance[..] else { unreachable!() };
+    assert!(calm.abs() < 0.15, "without wind the pile leans {calm}");
+    // A Pile never lies quite even, so the winds are judged against each other as well.
+    assert!(right > 0.05 && left < -0.05, "the pile leans {right} in a wind to the right and {left} in one to the left");
+    assert!(right - left > 0.15, "the winds leave the pile leaning only {right} and {left}");
+}
+
+#[test]
+fn snow_still_settles_in_a_strong_wind() {
+    let mut calm = SnowSimulation::new(1280.0, 800.0, Snowfall::Snow);
+    let mut windy = SnowSimulation::new(1280.0, 800.0, Snowfall::Snow);
+    windy.set_wind(Wind::StrongLeft);
+    run(&mut calm, 90.0, AWAY);
+    run(&mut windy, 90.0, AWAY);
+    let (calm, windy_area) = (piles(&calm)[0].1, piles(&windy)[0].1);
+    assert!(windy_area > 0.7 * calm, "the ground holds {windy_area} in the wind, {calm} without");
+
+    // With nothing falling, the wind moves the snow about but doesn't blow it all away.
+    windy.set_snowfall(Snowfall::Off);
+    run(&mut windy, 40.0, AWAY);
+    let before = piles(&windy)[0].1;
+    run(&mut windy, 30.0, AWAY);
+    let after = piles(&windy)[0].1;
+    assert!(after > 0.8 * before, "the wind blew the ground away: {before} → {after}");
+    assert_finite(&windy);
+}
+
+#[test]
+fn drifts_come_to_rest_in_a_steady_strong_wind() {
+    let none = HashSet::new();
+    let mut simulation = SnowSimulation::new(1280.0, 800.0, Snowfall::Snow);
+    simulation.thaws = false;
+    simulation.update_windows(&[surface(7, 300.0, 500.0, 300.0)], 0.2, &none, &none, false);
+    run(&mut simulation, 30.0, AWAY);
+    simulation.set_snowfall(Snowfall::Off);
+    simulation.set_wind(Wind::StrongRight);
+    run(&mut simulation, 900.0, AWAY);
+    let restless = (0..300).filter(|_| simulation.step(DT, AWAY)).count();
+    assert_eq!(restless, 0, "the drifts still change in {restless} of 300 steps");
+    assert!(simulation.has_snow(), "the wind blew everything away");
 }

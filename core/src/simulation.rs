@@ -55,6 +55,17 @@ const PACKING: f32 = 0.6;
 const SLIDE_DRAG: f32 = 0.025;
 const SLIDE_WIND_MAX: f32 = 160.0;
 const SLIDE_CALM: f32 = 0.35;
+/// How far a steady wind carries loose powder, as a share of its speed.
+const WIND_CARRY: f32 = 0.5;
+/// How hard a strong wind skims the drifts, on the scale a sliding desktop's wind uses.
+const WIND_SKIM: f32 = 0.3;
+/// The share of a column's loose snow a strong wind rolls on to the next column downwind each second.
+const WIND_CREEP: f32 = 1.2;
+/// The share of the snow a strong wind rolls on that packs where it arrives and moves no further: wind-packed
+/// snow, which lets the drifts come to rest.
+const WIND_PACKING: f32 = 0.02;
+/// How far a crest has to stand above the snow around it for a strong steady wind to skim it.
+const WIND_CREST: f32 = 2.0;
 
 /// How much snow falls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,6 +87,37 @@ impl Snowfall {
             Snowfall::Snow => 380.0,
             Snowfall::HeavySnow => 1200.0,
         }
+    }
+}
+
+/// A steady wind, on top of the light breeze that always comes and goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wind {
+    None,
+    LightLeft,
+    LightRight,
+    StrongLeft,
+    StrongRight,
+}
+
+impl Wind {
+    pub const ALL: [Wind; 5] = [Wind::None, Wind::LightLeft, Wind::LightRight, Wind::StrongLeft, Wind::StrongRight];
+
+    /// Its speed in points per second: positive to the right.
+    fn speed(self) -> f32 {
+        match self {
+            Wind::None => 0.0,
+            Wind::LightLeft => -45.0,
+            Wind::LightRight => 45.0,
+            Wind::StrongLeft => -140.0,
+            Wind::StrongRight => 140.0,
+        }
+    }
+
+    /// A strong wind also works on the drifts: it skims their crests and rolls loose snow along them.
+    /// A light wind leaves them be.
+    fn strong(self) -> bool {
+        matches!(self, Wind::StrongLeft | Wind::StrongRight)
     }
 }
 
@@ -217,6 +259,7 @@ struct Air {
     overflow: Vec<(f32, f32)>,
     gust: Option<Gust>,
     slide_wind: f32,
+    wind: Wind,
     /// How much more a window's jolts up and down count than on the Mac the snow was tuned on: across a smaller
     /// display, or by a gentler pointer, the same jerk of the hand moves it fewer points a second, and its snow should
     /// come off as easily. Side to side the snow slides on the window, which shows any such boost as sliding too far.
@@ -280,6 +323,7 @@ impl SnowSimulation {
                 overflow: Vec::new(),
                 gust: None,
                 slide_wind: 0.0,
+                wind: Wind::None,
                 jolt_scale: jolt_scale(height),
             },
         };
@@ -308,6 +352,11 @@ impl SnowSimulation {
             let top = self.height;
             self.air.flakes.retain(|flake| flake.position.y - flake.size <= top);
         }
+    }
+
+    /// The flakes in the air turn with a new wind over a second or two, as they follow any change of wind.
+    pub fn set_wind(&mut self, wind: Wind) {
+        self.air.wind = wind;
     }
 
     /// Scales the snowfall; flakes come and go through the usual cycle, so a change shows gradually.
@@ -369,6 +418,7 @@ impl SnowSimulation {
         }
         self.blow(dt);
         self.skim(dt);
+        self.creep(dt);
         self.advance_flakes(dt);
         self.advance_grains(dt);
         self.air.advance_motes(dt);
@@ -709,6 +759,8 @@ impl SnowSimulation {
             return;
         }
         let damping = (-GRAIN_DRAG * dt).exp();
+        // Loose powder slows to the steady wind's pace rather than to a stop.
+        let carry = self.air.wind.speed() * WIND_CARRY;
         let mut i = self.air.grains.len();
         while i > 0 {
             i -= 1;
@@ -721,7 +773,7 @@ impl SnowSimulation {
                 grain.velocity.y -= GRAVITY * 0.08 * dt;
             } else {
                 grain.velocity.y -= GRAVITY * dt;
-                grain.velocity *= damping;
+                grain.velocity = V2::new(carry + (grain.velocity.x - carry) * damping, grain.velocity.y * damping);
             }
             grain.position += grain.velocity * dt;
 
@@ -774,7 +826,8 @@ impl SnowSimulation {
 
     // Gust
 
-    /// The way the breeze blows now: 1 to the right, -1 to the left.
+    /// The way the air moves now, the breeze with any steady wind: 1 to the right, -1 to the left.
+    /// Clear snow blows this way, so with a wind it goes with the wind.
     pub fn breeze_direction(&self) -> f32 {
         if self.air.breeze() < 0.0 { -1.0 } else { 1.0 }
     }
@@ -853,30 +906,87 @@ impl SnowSimulation {
     }
 
     /// The wind of a sliding desktop skims the drifts, most off the crests that stand above the snow around them:
-    /// a little powder flies a short way downwind and settles again.
+    /// a little powder flies a short way downwind and settles again. A strong steady wind takes only the crests,
+    /// so once they are worn down the drifts lie still.
     fn skim(&mut self, dt: f32) {
-        let share = self.air.slide_wind.abs() / SLIDE_WIND_MAX;
+        let sliding = self.air.slide_wind.abs() / SLIDE_WIND_MAX;
+        let steady = if self.air.wind.strong() { WIND_SKIM } else { 0.0 };
+        let (share, base, crest) = if sliding > 0.1 { (sliding.max(steady), 0.2, 0.0) } else { (steady, 0.0, WIND_CREST) };
         if share <= 0.1 {
             return;
         }
 
-        for layer in &mut self.layers {
+        // Snow leaves a column a grain at a time, as often as its share would make up whole grains, so none is lost
+        // in rounding; a grain with no room in the air stays where it was.
+        const GRAIN: f32 = 1.5;
+        let mut puffs = Vec::new();
+        for (li, layer) in self.layers.iter_mut().enumerate() {
             let count = layer.count();
-            let mut dust = 0.0;
             for i in 0..count {
                 let height = layer.heights[i];
                 if !layer.visible[i] || height <= 1.5 {
                     continue;
                 }
                 let around = (layer.heights[i.saturating_sub(12)] + layer.heights[(i + 12).min(count - 1)]) / 2.0;
-                let loss = (height * 0.2).min((0.2 + (height - around).max(0.0) * 1.5) * share * dt);
-                layer.set(i, height - loss);
-                self.air.heights_changed = true;
-                dust += loss * layer.column_width;
-                while dust >= 1.5 {
-                    self.air.puff(V2::new(layer.center_x(i), layer.surface(i)), 1.5);
-                    dust -= 1.5;
+                let loss = (height * 0.2).min((base + (height - around - crest).max(0.0) * 1.5) * share * dt);
+                if loss <= 0.0 {
+                    continue;
                 }
+                let area = loss * layer.column_width;
+                let mut grains = (area / GRAIN) as usize;
+                if self.air.random.next() * GRAIN < area % GRAIN {
+                    grains += 1;
+                }
+                let grain_height = GRAIN / layer.column_width;
+                grains = grains.min((height * 0.5 / grain_height) as usize);
+                if grains == 0 {
+                    continue;
+                }
+                layer.set(i, height - grains as f32 * grain_height);
+                self.air.heights_changed = true;
+                puffs.extend(std::iter::repeat_n((li, i, V2::new(layer.center_x(i), layer.surface(i))), grains));
+            }
+        }
+        for (li, i, position) in puffs {
+            if !self.air.puff(position, GRAIN) {
+                let layer = &mut self.layers[li];
+                layer.set(i, layer.heights[i] + GRAIN / layer.column_width);
+            }
+        }
+    }
+
+    /// A strong steady wind rolls the loose snow along each Pile toward its downwind end: the upwind end thins and a
+    /// drift builds against the far one, up to just short of the slope snow holds at. A little of what arrives packs
+    /// down and moves no further, so without fresh snow the drifts come to rest.
+    /// Along an even Pile as much comes in as goes out, so only the ends change.
+    fn creep(&mut self, dt: f32) {
+        if !self.air.wind.strong() {
+            return;
+        }
+        let share = (WIND_CREEP * dt).min(0.5);
+        let rightward = self.air.wind.speed() > 0.0;
+        for layer in &mut self.layers {
+            let count = layer.count();
+            if count < 2 {
+                continue;
+            }
+            let steepest = REPOSE * layer.column_width * 0.9;
+            // From the downwind end back, so snow moves at most one column a step.
+            for step in 0..count - 1 {
+                let (from, to) = if rightward { (count - 2 - step, count - 1 - step) } else { (step + 1, step) };
+                // Snow the cursor holds up stays put, as it does against slumping.
+                if !layer.visible[from] || !layer.visible[to] || layer.held(from) || layer.held(to) {
+                    continue;
+                }
+                let loose = layer.heights[from] - layer.packed[from];
+                if loose <= 0.01 || layer.surface(to) - layer.surface(from) >= steepest {
+                    continue;
+                }
+                let moved = loose * share;
+                layer.set(from, layer.heights[from] - moved);
+                layer.set(to, layer.heights[to] + moved);
+                layer.packed[to] += moved * WIND_PACKING;
+                self.air.heights_changed = true;
             }
         }
     }
@@ -1460,9 +1570,10 @@ impl Air {
         self.breeze() + self.gust_speed() + self.slide_wind
     }
 
+    /// The air's own movement: the light breeze that comes and goes, and the steady wind on top of it.
     fn breeze(&self) -> f32 {
         let t = self.clock;
-        (10.0 * (t * 0.07).sin() + 6.0 * (t * 0.19 + 1.7).sin() + 3.0 * (t * 0.43 + 4.1).sin()) as f32
+        (10.0 * (t * 0.07).sin() + 6.0 * (t * 0.19 + 1.7).sin() + 3.0 * (t * 0.43 + 4.1).sin()) as f32 + self.wind.speed()
     }
 
     fn gust_speed(&self) -> f32 {
@@ -1502,12 +1613,13 @@ impl Air {
         });
     }
 
-    /// A pinch of powder off a crest, thrown downwind by a sliding desktop's wind; it lands again where it falls.
-    fn puff(&mut self, position: V2, area: f32) {
+    /// A pinch of powder off a crest, thrown downwind; it lands again where it falls.
+    /// Returns whether there was room for it in the air.
+    fn puff(&mut self, position: V2, area: f32) -> bool {
         if self.grains.len() >= MAX_GRAINS {
-            return;
+            return false;
         }
-        let wind = self.slide_wind;
+        let wind = self.slide_wind + self.wind.speed() * WIND_CARRY;
         let random = &mut self.random;
         self.grains.push(Grain {
             position: position + V2::new(random.range(-1.0, 1.0), random.range(-2.0, 0.0)),
@@ -1518,7 +1630,7 @@ impl Air {
             blown: false,
         });
         if random.next() >= 0.3 || self.motes.len() >= MAX_MOTES {
-            return;
+            return true;
         }
         self.motes.push(Mote {
             position,
@@ -1528,6 +1640,7 @@ impl Air {
             age: 0.0,
             life: random.range(0.5, 1.0),
         });
+        true
     }
 }
 

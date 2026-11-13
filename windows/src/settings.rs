@@ -8,20 +8,8 @@ use std::collections::HashMap;
 
 /// How much snow falls: the engine's own levels.
 pub use snowfall_core::simulation::Snowfall as Level;
-
-/// Which way, and how hard, the wind blows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Wind {
-    None,
-    LightLeft,
-    LightRight,
-    StrongLeft,
-    StrongRight,
-}
-
-impl Wind {
-    pub const ALL: [Wind; 5] = [Wind::None, Wind::LightLeft, Wind::LightRight, Wind::StrongLeft, Wind::StrongRight];
-}
+/// Which way, and how hard, the wind blows: the engine's own winds.
+pub use snowfall_core::simulation::Wind;
 
 /// How opaque falling snow is, in percent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,7 +107,7 @@ impl Settings {
         let flag = |name: &str, default: bool| store.number(name).map_or(default, |value| value != 0);
         Settings {
             level: store.number("level").and_then(level_from_code).unwrap_or(defaults.level),
-            wind: store.number("wind").and_then(|i| Wind::ALL.get(i as usize).copied()).unwrap_or(defaults.wind),
+            wind: store.number("wind").and_then(wind_from_code).unwrap_or(defaults.wind),
             screens_off: store
                 .text("screensOff")
                 .map(|text| text.split('\n').filter(|screen| !screen.is_empty()).map(str::to_owned).collect())
@@ -136,9 +124,8 @@ impl Settings {
     }
 
     pub fn save(&self, store: &mut impl Store) {
-        let index = |position: Option<usize>| position.unwrap_or(0) as u32;
         store.set_number("level", level_code(self.level));
-        store.set_number("wind", index(Wind::ALL.iter().position(|&wind| wind == self.wind)));
+        store.set_number("wind", wind_code(self.wind));
         store.set_text("screensOff", &self.screens_off.iter().cloned().collect::<Vec<_>>().join("\n"));
         store.set_number("opacity", self.opacity.0 as u32);
         store.set_number("melt", self.melt as u32);
@@ -162,6 +149,21 @@ fn level_code(level: Level) -> u32 {
 
 fn level_from_code(code: u32) -> Option<Level> {
     [Level::Off, Level::Snow, Level::HeavySnow].into_iter().find(|&level| level_code(level) == code)
+}
+
+/// How a wind is stored: fixed codes, as for the level.
+fn wind_code(wind: Wind) -> u32 {
+    match wind {
+        Wind::None => 0,
+        Wind::LightLeft => 1,
+        Wind::LightRight => 2,
+        Wind::StrongLeft => 3,
+        Wind::StrongRight => 4,
+    }
+}
+
+fn wind_from_code(code: u32) -> Option<Wind> {
+    Wind::ALL.into_iter().find(|&wind| wind_code(wind) == code)
 }
 
 /// Where settings are kept between runs: named numbers and texts.
