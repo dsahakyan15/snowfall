@@ -576,7 +576,7 @@ fn snow_still_settles_in_a_strong_wind() {
 }
 
 #[test]
-fn drifts_come_to_rest_in_a_steady_strong_wind() {
+fn piles_come_to_rest_in_a_steady_strong_wind() {
     let none = HashSet::new();
     let mut simulation = SnowSimulation::new(1280.0, 800.0, Snowfall::Snow);
     simulation.thaws = false;
@@ -586,6 +586,77 @@ fn drifts_come_to_rest_in_a_steady_strong_wind() {
     simulation.set_wind(Wind::StrongRight);
     run(&mut simulation, 900.0, AWAY);
     let restless = (0..300).filter(|_| simulation.step(DT, AWAY)).count();
-    assert_eq!(restless, 0, "the drifts still change in {restless} of 300 steps");
+    assert_eq!(restless, 0, "the Piles still change in {restless} of 300 steps");
     assert!(simulation.has_snow(), "the wind blew everything away");
+}
+
+/// Snow area in the Pile on the window's Ledge, found by its height; none once it has melted away.
+fn on_window(simulation: &SnowSimulation) -> f32 {
+    piles(simulation).iter().find(|(origin, _)| origin.y > 100.0).map_or(0.0, |pile| pile.1)
+}
+
+#[test]
+fn keeping_windows_clear_leaves_only_a_trace_on_a_window_in_heavy_snow() {
+    let none = HashSet::new();
+    let mut simulation = SnowSimulation::new(1280.0, 800.0, Snowfall::HeavySnow);
+    simulation.set_keeps_windows_clear(true);
+    simulation.update_windows(&[surface(7, 300.0, 500.0, 600.0)], 0.2, &none, &none, false);
+    let mut thickest: f32 = 0.0;
+    for _ in 0..120 {
+        run(&mut simulation, 1.0, AWAY);
+        thickest = thickest.max(on_window(&simulation) / 600.0);
+    }
+    // Flakes still land, each melting within a second or so; a Pile here would reach 14 deep.
+    assert!(thickest < 1.5, "snow on the window averaged up to {thickest} deep");
+}
+
+#[test]
+fn keeping_windows_clear_keeps_a_thin_pile_on_the_ground_that_stops_growing() {
+    let mut simulation = SnowSimulation::new(1280.0, 800.0, Snowfall::HeavySnow);
+    simulation.set_keeps_windows_clear(true);
+    run(&mut simulation, 60.0, AWAY);
+    let early = piles(&simulation)[0].1 / 1280.0;
+    run(&mut simulation, 120.0, AWAY);
+    let late = piles(&simulation)[0].1 / 1280.0;
+    assert!(late > 1.0, "no Pile kept on the ground: {late} deep on average");
+    assert!(late < 6.0, "the ground's Pile is {late} deep on average");
+    assert!(late < early * 1.15, "the ground's Pile keeps growing: {early} → {late} deep");
+}
+
+#[test]
+fn keeping_windows_clear_melts_snow_already_on_windows_within_seconds() {
+    let none = HashSet::new();
+    let mut simulation = SnowSimulation::new(1280.0, 800.0, Snowfall::HeavySnow);
+    simulation.update_windows(&[surface(7, 300.0, 500.0, 600.0)], 0.2, &none, &none, false);
+    run(&mut simulation, 60.0, AWAY);
+    let before = on_window(&simulation) / 600.0;
+    assert!(before > 5.0, "the window gathered only {before} deep");
+    simulation.set_keeps_windows_clear(true);
+    run(&mut simulation, 5.0, AWAY);
+    // Down to the trace the falling snow leaves.
+    let after = on_window(&simulation) / 600.0;
+    assert!(after < 1.5, "the window still holds {after} deep, from {before}");
+    assert_finite(&simulation);
+}
+
+#[test]
+fn keeping_windows_clear_also_melts_the_snow_of_windows_out_of_sight() {
+    let none = HashSet::new();
+    let window = [surface(7, 300.0, 600.0, 500.0)];
+    let mut simulation = SnowSimulation::new(1280.0, 800.0, Snowfall::HeavySnow);
+    simulation.update_windows(&window, 0.2, &none, &none, false);
+    run(&mut simulation, 60.0, AWAY);
+    simulation.set_snowfall(Snowfall::Off);
+    run(&mut simulation, 2.0, AWAY);
+    let full = on_window(&simulation);
+    assert!(full > 1000.0, "the window gathered only {full}");
+
+    // The window goes to another desktop, taking its Pile out of sight; it comes back once windows are kept clear.
+    simulation.update_windows(&[], 0.2, &none, &HashSet::from([7]), false);
+    run(&mut simulation, 1.0, AWAY);
+    simulation.set_keeps_windows_clear(true);
+    simulation.update_windows(&window, 0.2, &none, &none, false);
+    run(&mut simulation, 1.0, AWAY);
+    // Only the trace of the last flakes still landing.
+    assert!(on_window(&simulation) < full * 0.1, "the Pile came back with {} of {full}", on_window(&simulation));
 }
