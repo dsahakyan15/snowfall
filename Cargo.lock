@@ -21,17 +21,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "snowfall-core"
+version = "0.0.0"
+
+[[package]]
 name = "snowhush"
 version = "0.6.1"
 dependencies = [
- "snowhush-core",
+ "snowfall-core",
  "windows",
  "windows-numerics",
 ]
-
-[[package]]
-name = "snowhush-core"
-version = "0.0.0"
 
 [[package]]
 name = "syn"

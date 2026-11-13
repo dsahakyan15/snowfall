@@ -37,10 +37,6 @@ pub struct SnowLayer {
     /// The window's right edge, where the snow ends short of a whole column: which edge moved tells a resize from a
     /// move.
     pub right: f32,
-    /// How many leaves lie on this heap, as of the last step.
-    pub lying_leaves: f32,
-    /// How fast the heap was going as it came off its window at this step, for the leaves lying on it to go along.
-    pub thrown: Option<V2>,
     pub swing_direction: V2,
     pub swing_peak: f32,
     pub previous_swing_peak: f32,
@@ -80,8 +76,6 @@ impl SnowLayer {
             agitation: 0.0,
             drift: 0.0,
             right: 0.0,
-            lying_leaves: 0.0,
-            thrown: None,
             swing_direction: V2::ZERO,
             swing_peak: 0.0,
             previous_swing_peak: 0.0,
@@ -107,12 +101,6 @@ impl SnowLayer {
 
     pub fn base(&self) -> V2 {
         self.origin + self.offset
-    }
-
-    /// Where the snow's own positions along it start: what lies in it keeps its place there as it slides or the
-    /// window's left edge moves under it.
-    pub fn heap_x(&self) -> f32 {
-        self.base().x + self.drift
     }
 
     pub fn index(&self, x: f32) -> Option<usize> {
