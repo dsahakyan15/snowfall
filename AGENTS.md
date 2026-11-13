@@ -8,7 +8,7 @@ Target: Windows 10 2004+ / Windows 11, x64.
 
 Reference project Snowhush (github.com/mbezruchko/Snowhush) is MIT only up to and including tag `v0.6.1`. Everything after is PolyForm Noncommercial.
 
-- Code may be copied/adapted **only** from Snowhush `<= v0.6.1`, keeping its MIT copyright notice (see `THIRD_PARTY_NOTICES.md` once it exists).
+- Code may be copied/adapted **only** from Snowhush `<= v0.6.1`, keeping its MIT copyright notice (see `THIRD_PARTY_NOTICES.md`).
 - Snowhush `> v0.6.1` may be read for ideas and techniques only. Never paste code from it.
 - Never use KoiArt's name, artwork, wallpapers, or branding. Matching its snow behaviour is fine; the visuals are our own.
 
