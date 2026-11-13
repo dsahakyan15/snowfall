@@ -30,6 +30,7 @@ use snowfall_core::simulation::{Pace, SnowSimulation, WindowId, WindowSurface};
 use crate::desktop::DesktopLayer;
 use crate::light::{Backdrop, Sky, Wallpapers};
 use crate::log;
+use crate::power::Power;
 use crate::render::{Ambient, Gpu, Surface};
 use crate::settings::Settings;
 use crate::tracker::{COVER_ONLY, Tracker, class_name, cloaked, process_name};
@@ -43,16 +44,6 @@ thread_local! {
     pub static BACKDROP_CHANGED: Cell<bool> = const { Cell::new(false) };
     /// The windows at the top last logged by `lowest_open_popup`.
     static TOP_LOGGED: RefCell<String> = const { RefCell::new(String::new()) };
-}
-
-/// How much the snow may spend on drawing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PowerBudget {
-    Full,
-    /// On battery: no frame rates above 60, which are hard to tell apart in snow anyway.
-    Battery,
-    /// Energy saver: a little less snow, drawn a little less often.
-    Saver,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -298,6 +289,8 @@ pub struct Screen {
     windows_seen: u64,
     windows_changed_at: i64,
     covered: bool,
+    /// Hidden and still while Pause on battery stops the snow.
+    paused: bool,
     backdrop: Option<Backdrop>,
     shadow_tint: [f32; 4],
     layer: Option<DesktopLayer>,
@@ -332,6 +325,7 @@ impl Screen {
             windows_seen: 0,
             windows_changed_at: 0,
             covered: false,
+            paused: false,
             backdrop: None,
             shadow_tint: [0.0; 4],
             layer,
@@ -356,7 +350,7 @@ impl Screen {
     }
 
     /// Steps the snow and draws it if anything visible changed; returns whether it drew.
-    pub fn frame(&mut self, gpu: &Gpu, clock: &Clock, now: i64, budget: PowerBudget, sky: Sky, time: f32, windows: &Tracker) -> Result<bool> {
+    pub fn frame(&mut self, gpu: &Gpu, clock: &Clock, now: i64, power: Power, sky: Sky, time: f32, windows: &Tracker) -> Result<bool> {
         let dt = if self.last_step == 0 { 1.0 / 60.0 } else { clock.seconds(now - self.last_step).min(0.05) as f32 };
         self.last_step = now;
         self.follow(windows, clock, now);
@@ -368,9 +362,10 @@ impl Screen {
             self.next_due = now + clock.frequency;
             return Ok(false);
         }
-        let fastest = if budget == PowerBudget::Full { self.interactive_rate } else { self.interactive_rate.min(60) };
+        // On battery or saver, no frame rates above 60, which are hard to tell apart in snow anyway.
+        let fastest = if power.battery || power.saver { self.interactive_rate.min(60) } else { self.interactive_rate };
         // 24 only where it divides the display's rate evenly; elsewhere it would judder.
-        let calm = if budget == PowerBudget::Saver && self.interactive_rate % 24 == 0 { 24 } else { 30 };
+        let calm = if power.saver && self.interactive_rate % 24 == 0 { 24 } else { 30 };
         let rate = match self.simulation.pace() {
             Pace::Calm => calm,
             Pace::Lively => fastest.min(60),
@@ -415,14 +410,27 @@ impl Screen {
 
     /// Hides the snow while a full-screen app covers the display, and stops it, as it stops over a full-screen app on a Mac.
     pub fn set_covered(&mut self, covered: bool) {
-        if covered == self.covered {
-            return;
+        if covered != self.covered {
+            self.covered = covered;
+            self.show();
         }
-        self.covered = covered;
+    }
+
+    /// Hides the snow and stops it while Pause on battery holds it, and brings it back where it was.
+    pub fn set_paused(&mut self, paused: bool) {
+        if paused != self.paused {
+            self.paused = paused;
+            self.show();
+        }
+    }
+
+    /// Shows the overlay unless a full-screen app covers it or the snow is paused; shown again, it picks up from now.
+    fn show(&mut self) {
+        let hidden = self.covered || self.paused;
         unsafe {
-            let _ = ShowWindow(self.overlay.0, if covered { SW_HIDE } else { SW_SHOWNOACTIVATE });
+            let _ = ShowWindow(self.overlay.0, if hidden { SW_HIDE } else { SW_SHOWNOACTIVATE });
         }
-        if !covered {
+        if !hidden {
             self.resume();
         }
     }

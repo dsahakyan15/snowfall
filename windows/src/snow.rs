@@ -18,9 +18,10 @@ use snowfall_core::simulation::SnowSimulation;
 use crate::desktop::{self, DesktopLayer};
 use crate::light::{Sky, Wallpapers};
 use crate::log;
+use crate::power::{self, Power, Strength};
 use crate::render::Gpu;
 use crate::screen::{
-    BACKDROP_CHANGED, Clock, DISPLAYS_CHANGED, Monitor, Names, PowerBudget, Screen, dip_size, display_names, listen, monitors, walls, watch_taskbar,
+    BACKDROP_CHANGED, Clock, DISPLAYS_CHANGED, Monitor, Names, Screen, dip_size, display_names, listen, monitors, walls, watch_taskbar,
 };
 use crate::settings::Settings;
 use crate::tracker::{self, Tracker};
@@ -30,6 +31,8 @@ pub enum Command {
     Settings(Settings),
     /// Explorer started again, taking the desktop's wallpaper layer with it.
     ShellRestarted,
+    /// The power source or saver changed.
+    PowerChanged,
     /// Off while the screen is locked, asleep or the session is away.
     Active(bool),
     /// Blows all the snow away; when calm, for less motion, melts it where it lies instead.
@@ -61,7 +64,8 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
     let _listener = listen()?;
     let mut layer = settings.behind_windows.then(find_layer).flatten();
     let mut names = Names::new();
-    let mut screens = sync_screens(&gpu, &settings, &mut names, Vec::new(), layer, false);
+    let mut power = read_power();
+    let mut screens = sync_screens(&gpu, &settings, &mut names, Vec::new(), layer, false, power);
     let timer = unsafe {
         CreateWaitableTimerExW(None, PCWSTR::null(), CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS.0)
             .or_else(|_| CreateWaitableTimerW(None, false, PCWSTR::null()))?
@@ -70,7 +74,6 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
     let mut clock = Clock::new();
     let started = Clock::now();
     let mut active = true;
-    let mut budget = PowerBudget::Full;
     let mut sky = Sky::now();
     let wallpapers = Wallpapers::new().inspect_err(|error| log!("wallpapers unavailable: {error}")).ok();
     let mut chores_at = 0;
@@ -99,9 +102,12 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
                     // Moving behind windows or back rebuilds every overlay; screens turned on or off only add or remove some.
                     if settings.behind_windows != previous.behind_windows {
                         layer = settings.behind_windows.then(find_layer).flatten();
-                        screens = sync_screens(&gpu, &settings, &mut names, screens, layer, true);
+                        screens = sync_screens(&gpu, &settings, &mut names, screens, layer, true, power);
                     } else if settings.screens_off != previous.screens_off {
-                        screens = sync_screens(&gpu, &settings, &mut names, screens, layer, false);
+                        screens = sync_screens(&gpu, &settings, &mut names, screens, layer, false, power);
+                    }
+                    if settings.pause_on_battery != previous.pause_on_battery {
+                        apply_power(&mut screens, power, &settings);
                     }
                     if settings.show_in_screenshots != previous.show_in_screenshots {
                         screens.iter().for_each(|screen| screen.show_in_screenshots(settings.show_in_screenshots));
@@ -110,12 +116,17 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
                 Command::ShellRestarted => {
                     if settings.behind_windows {
                         layer = find_layer();
-                        screens = sync_screens(&gpu, &settings, &mut names, screens, layer, true);
+                        screens = sync_screens(&gpu, &settings, &mut names, screens, layer, true, power);
                     }
                 }
                 Command::ClearSnow(calm) => {
                     let direction = screens.first().map_or(-1.0, |screen| screen.simulation.breeze_direction());
                     screens.iter_mut().for_each(|screen| screen.simulation.blow_away(direction, calm));
+                }
+                Command::PowerChanged => {
+                    power = read_power();
+                    log!("power: {power:?}");
+                    apply_power(&mut screens, power, &settings);
                 }
                 Command::Active(on) => {
                     if on && !active {
@@ -148,7 +159,7 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
             if settings.behind_windows {
                 layer = find_layer();
             }
-            screens = sync_screens(&gpu, &settings, &mut names, screens, layer, false);
+            screens = sync_screens(&gpu, &settings, &mut names, screens, layer, false, power);
             clock.refresh();
             light_at = 0;
         }
@@ -164,12 +175,12 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
             if current.len() != screens.len() || screens.iter().any(|screen| !current.contains(&screen.monitor)) {
                 DISPLAYS_CHANGED.set(true);
             }
-            let next = power_budget();
-            if next != budget {
-                budget = next;
-                log!("power: {budget:?}");
-                let density = if budget == PowerBudget::Saver { 0.75 } else { 1.0 };
-                screens.iter_mut().for_each(|screen| screen.simulation.set_density(density));
+            // In case a change of power went unannounced.
+            let next = read_power();
+            if next != power {
+                power = next;
+                log!("power: {power:?}");
+                apply_power(&mut screens, power, &settings);
             }
             screens.iter().for_each(Screen::raise);
             // Behind windows, the overlays live inside Explorer's windows and vanish when it restarts; until the
@@ -178,7 +189,7 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
                 let found = find_layer();
                 if found.is_some() || screens.iter().any(|screen| !screen.alive()) {
                     layer = found;
-                    screens = sync_screens(&gpu, &settings, &mut names, screens, layer, true);
+                    screens = sync_screens(&gpu, &settings, &mut names, screens, layer, true, power);
                 }
             }
             // Wallpaper apps share the layer the snow goes into; how they settle around it tells what went wrong.
@@ -198,7 +209,9 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
             }
         }
 
-        if active {
+        // Paused on battery, the screens are hidden and nothing runs, as when locked; a change of power wakes the thread.
+        let running = active && power::strength(power, settings.pause_on_battery) != Strength::Paused;
+        if running {
             // A drag starting is drawn right away instead of at the next calm frame.
             if tracker.take_started_moving() {
                 screens.iter_mut().for_each(|screen| screen.wake(now));
@@ -221,7 +234,7 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
                     continue;
                 }
                 let began = Clock::now();
-                match screen.frame(&gpu, &clock, now, budget, sky, time, windows) {
+                match screen.frame(&gpu, &clock, now, power, sky, time, windows) {
                     Ok(drew) => stats.frame(drew, Clock::now() - began, screen.simulation.sprite_count()),
                     Err(error) => {
                         log!("frame failed: {error}");
@@ -232,13 +245,13 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
             if lost {
                 screens.clear();
                 gpu = Gpu::new()?;
-                screens = sync_screens(&gpu, &settings, &mut names, Vec::new(), layer, false);
+                screens = sync_screens(&gpu, &settings, &mut names, Vec::new(), layer, false, power);
             }
             now = Clock::now();
             stats.report(&clock, now, &mut tracker);
         }
 
-        let due = screens.iter().map(|screen| screen.next_due).min().filter(|_| active);
+        let due = screens.iter().map(|screen| screen.next_due).min().filter(|_| running);
         unsafe {
             if let Some(due) = due {
                 let wait = -(((due - now).max(0) as i128 * 10_000_000) / clock.frequency as i128) as i64;
@@ -263,6 +276,7 @@ fn sync_screens(
     mut current: Vec<Screen>,
     layer: Option<DesktopLayer>,
     rebuild: bool,
+    power: Power,
 ) -> Vec<Screen> {
     let mut result = Vec::new();
     *names = display_names();
@@ -308,6 +322,7 @@ fn sync_screens(
     for screen in &mut result {
         screen.simulation.walls = walls(&screen.monitor, &displays);
     }
+    apply_power(&mut result, power, settings);
     result
 }
 
@@ -338,17 +353,20 @@ fn configure(simulation: &mut SnowSimulation, settings: &Settings) {
     simulation.thaws = settings.melt;
 }
 
-fn power_budget() -> PowerBudget {
+fn read_power() -> Power {
     let mut status = SYSTEM_POWER_STATUS::default();
     if unsafe { GetSystemPowerStatus(&mut status) }.is_err() {
-        return PowerBudget::Full;
+        return Power::default();
     }
-    if status.SystemStatusFlag == 1 {
-        PowerBudget::Saver
-    } else if status.ACLineStatus == 0 {
-        PowerBudget::Battery
-    } else {
-        PowerBudget::Full
+    Power { battery: status.ACLineStatus == 0, saver: status.SystemStatusFlag == 1 }
+}
+
+/// Gives every screen the strength the power source and Pause on battery call for.
+fn apply_power(screens: &mut [Screen], power: Power, settings: &Settings) {
+    let strength = power::strength(power, settings.pause_on_battery);
+    for screen in screens {
+        screen.simulation.set_density(strength.density());
+        screen.set_paused(strength == Strength::Paused);
     }
 }
 
