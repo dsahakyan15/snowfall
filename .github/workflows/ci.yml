@@ -11,8 +11,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Rust toolchain
-        run: rustup update stable --no-self-update && rustup default stable
+        run: rustup update stable --no-self-update && rustup default stable && rustup component add rustfmt
       - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
       - name: Build
         run: cargo build --release --locked
       - name: Test
