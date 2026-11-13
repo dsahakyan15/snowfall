@@ -1,25 +1,16 @@
 [package]
-name = "snowhush"
-version = "0.6.1"
+name = "snowfall"
+version = "0.1.0"
 edition = "2024"
 publish = false
 autobins = false
 
-[features]
-# Builds Snowhush-Setup.exe, which carries the app built first: see build.sh.
-setup = []
-
 [[bin]]
-name = "Snowhush"
+name = "Snowfall"
 path = "src/main.rs"
 
-[[bin]]
-name = "Snowhush-Setup"
-path = "src/bin/setup.rs"
-required-features = ["setup"]
-
 [dependencies]
-snowhush-core = { path = "../core" }
+snowfall-core = { path = "../core" }
 
 [target.'cfg(windows)'.dependencies]
 windows-numerics = "0.3"

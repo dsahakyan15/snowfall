@@ -3,6 +3,10 @@
 version = 4
 
 [[package]]
+name = "icons"
+version = "0.0.0"
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -21,16 +25,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "snowhush"
-version = "0.6.1"
+name = "snowfall"
+version = "0.1.0"
 dependencies = [
- "snowhush-core",
+ "snowfall-core",
  "windows",
  "windows-numerics",
 ]
 
 [[package]]
-name = "snowhush-core"
+name = "snowfall-core"
 version = "0.0.0"
 
 [[package]]

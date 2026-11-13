@@ -1,0 +1,4 @@
+[package]
+name = "icons"
+edition = "2024"
+publish = false

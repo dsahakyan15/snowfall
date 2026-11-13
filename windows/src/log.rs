@@ -7,7 +7,7 @@ use std::time::Instant;
 static LOG: Mutex<Option<(File, Instant)>> = Mutex::new(None);
 
 pub fn path() -> Option<PathBuf> {
-    std::env::var_os("LOCALAPPDATA").map(|base| PathBuf::from(base).join("Snowhush").join("snowhush.log"))
+    std::env::var_os("LOCALAPPDATA").map(|base| PathBuf::from(base).join("Snowfall").join("snowfall.log"))
 }
 
 pub fn start() {

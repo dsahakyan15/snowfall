@@ -1,5 +1,5 @@
 [workspace]
-members = ["core", "windows"]
+members = ["core", "windows", "tools/icons"]
 resolver = "3"
 
 [profile.release]

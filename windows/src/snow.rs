@@ -13,25 +13,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{HSTRING, PCWSTR, Result, w};
 
-use snowhush_core::geometry::V2;
-use snowhush_core::simulation::{ScatterPiece, SnowSimulation, Snowfall};
+use snowfall_core::simulation::{SnowSimulation, Snowfall};
 
 use crate::desktop::{self, DesktopLayer};
-use crate::halloween::season;
 use crate::light::{Sky, Wallpapers};
 use crate::log;
 use crate::prefs::Settings;
 use crate::render::Gpu;
 use crate::screen::{BACKDROP_CHANGED, Clock, DISPLAYS_CHANGED, Monitor, PowerBudget, Screen, dip_size, listen, monitors, walls, watch_taskbar};
 use crate::tracker::{self, Tracker};
-
-/// A piece of the welcome window crumbling into snow, in physical screen pixels.
-pub struct Piece {
-    pub x: f32,
-    pub y: f32,
-    pub velocity: V2,
-    pub color: [f32; 3],
-}
 
 pub enum Command {
     Snowfall(Snowfall),
@@ -45,19 +35,8 @@ pub enum Command {
     ShowInScreenshots(bool),
     /// Off while the screen is locked, asleep or the session is away.
     Active(bool),
-    Scatter(Vec<Piece>),
-    /// Starts the snowfall held back for the welcome window.
-    ReleaseSnowfall,
     /// Blows all the snow away; when calm, for less motion, melts it where it lies instead.
     ClearSnow(bool),
-    /// Whether Halloween is wanted when it comes.
-    Halloween(bool),
-    /// Leaves fall instead of snow, or snow instead of leaves, once a gust has blown what is there away; when calm, for
-    /// less motion, it melts where it lies instead.
-    SwitchMode {
-        autumn: bool,
-        calm: bool,
-    },
     Quit,
 }
 
@@ -70,9 +49,9 @@ pub struct Links {
 pub fn run(commands: Receiver<Command>, links: Links, settings: Settings) {
     if let Err(error) = run_loop(&commands, &links, settings) {
         log!("stopped: {error}");
-        let text = HSTRING::from(format!("Snowhush couldn't start drawing snow.\n\n{error}"));
+        let text = HSTRING::from(format!("Snowfall couldn't start drawing snow.\n\n{error}"));
         unsafe {
-            MessageBoxW(None, &text, w!("Snowhush"), MB_OK | MB_ICONERROR);
+            MessageBoxW(None, &text, w!("Snowfall"), MB_OK | MB_ICONERROR);
             let _ = PostMessageW(Some(HWND(links.controller as _)), WM_CLOSE, WPARAM(0), LPARAM(0));
         }
     }
@@ -94,8 +73,7 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
     let started = Clock::now();
     let mut active = true;
     let mut budget = PowerBudget::Full;
-    let mut halloween = settings.halloween && season();
-    let mut sky = Sky::now(halloween);
+    let mut sky = Sky::now();
     let wallpapers = Wallpapers::new().inspect_err(|error| log!("wallpapers unavailable: {error}")).ok();
     let mut chores_at = 0;
     let mut light_at = 0;
@@ -151,38 +129,9 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
                     settings.show_in_screenshots = on;
                     screens.iter().for_each(|screen| screen.show_in_screenshots(on));
                 }
-                Command::Scatter(pieces) => {
-                    let Some(first) = pieces.first() else { continue };
-                    let index = screens.iter().position(|screen| screen.contains(first.x, first.y)).unwrap_or(0);
-                    let Some(screen) = screens.get_mut(index) else { continue };
-                    let local: Vec<ScatterPiece> = pieces
-                        .iter()
-                        .map(|piece| ScatterPiece { position: screen.local(piece.x, piece.y), velocity: piece.velocity, color: piece.color })
-                        .collect();
-                    screen.simulation.scatter(&local);
-                    screen.wake(Clock::now());
-                }
-                Command::ReleaseSnowfall => {
-                    settings.welcomed = true;
-                    screens.iter_mut().for_each(|screen| screen.simulation.set_snowfall_held(false));
-                }
                 Command::ClearSnow(calm) => {
                     let direction = screens.first().map_or(-1.0, |screen| screen.simulation.breeze_direction());
                     screens.iter_mut().for_each(|screen| screen.simulation.blow_away(direction, calm));
-                }
-                Command::Halloween(on) => {
-                    settings.halloween = on;
-                    chores_at = 0;
-                    light_at = 0;
-                }
-                Command::SwitchMode { autumn, calm } => {
-                    settings.autumn = autumn;
-                    let direction = screens.first().map_or(-1.0, |screen| screen.simulation.breeze_direction());
-                    let now = Clock::now();
-                    screens.iter_mut().for_each(|screen| {
-                        screen.simulation.switch_mode(autumn, direction, calm);
-                        screen.wake(now);
-                    });
                 }
                 Command::Active(on) => {
                     if on && !active {
@@ -258,16 +207,7 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
             }
             if now >= light_at {
                 light_at = now + clock.frequency * 60;
-                let on = settings.halloween && season();
-                if on != halloween {
-                    halloween = on;
-                    log!("halloween: {on}");
-                    screens.iter_mut().for_each(|screen| {
-                        screen.simulation.set_halloween(on);
-                        screen.wake(now);
-                    });
-                }
-                sky = Sky::now(halloween);
+                sky = Sky::now();
                 if let Some(wallpapers) = &wallpapers {
                     screens.iter_mut().for_each(|screen| screen.update_backdrop(wallpapers));
                 }
@@ -286,7 +226,6 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
             let windows = settings.snow_on_windows.then_some(&tracker);
             let time = (clock.seconds(now - started) % 1000.0) as f32;
             let mut lost = false;
-            let mut released = false;
             for screen in screens.iter_mut().filter(|screen| screen.next_due <= now + clock.tolerance()) {
                 let covering = tracker.covering(&screen.monitor.bounds);
                 if covering.is_some() != screen.covered() {
@@ -299,20 +238,12 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
                 }
                 let began = Clock::now();
                 match screen.frame(&gpu, &clock, now, budget, sky, time, windows) {
-                    Ok(drew) => {
-                        stats.frame(drew, Clock::now() - began, screen.simulation.sprite_count());
-                        released |= screen.simulation.take_snowfall_released();
-                    }
+                    Ok(drew) => stats.frame(drew, Clock::now() - began, screen.simulation.sprite_count()),
                     Err(error) => {
                         log!("frame failed: {error}");
                         lost = true;
                     }
                 }
-            }
-            // The first display the welcome window's snow reaches starts the snowfall on all of them.
-            if released {
-                settings.welcomed = true;
-                screens.iter_mut().for_each(|screen| screen.simulation.set_snowfall_held(false));
             }
             if lost {
                 screens.clear();
@@ -390,9 +321,6 @@ fn new_simulation(monitor: &Monitor, settings: &Settings) -> SnowSimulation {
     let mut simulation = SnowSimulation::new(width as f32, height as f32, settings.snowfall);
     simulation.thaws = settings.melt;
     simulation.accumulates = settings.accumulate;
-    simulation.set_snowfall_held(!settings.welcomed);
-    simulation.set_halloween(settings.halloween && season());
-    simulation.set_autumn(settings.autumn);
     simulation
 }
 

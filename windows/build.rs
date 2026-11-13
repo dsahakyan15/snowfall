@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-const ICON: &str = "assets/Snowhush.ico";
+const ICON: &str = "assets/Snowfall.ico";
 const RT_ICON: u16 = 3;
 const RT_GROUP_ICON: u16 = 14;
 const RT_VERSION: u16 = 16;
@@ -18,7 +18,7 @@ fn main() {
     }
     let version = env!("CARGO_PKG_VERSION");
     let icon_file = std::fs::read(ICON).expect("icon");
-    for (binary, description) in [("Snowhush", "Snowhush"), ("Snowhush-Setup", "Snowhush Setup")] {
+    for (binary, description) in [("Snowfall", "Snowfall")] {
         // A .res file opens with an empty entry.
         let mut res = vec![0, 0, 0, 0, 32, 0, 0, 0, 0xFF, 0xFF, 0, 0, 0xFF, 0xFF, 0, 0];
         res.extend([0; 16]);
@@ -71,13 +71,13 @@ fn version_info(version: &str, description: &str, filename: &str) -> Vec<u8> {
         fixed.extend((value as u32).to_le_bytes());
     }
     let strings = [
-        ("CompanyName", "Mykhailo Bezruchko"),
+        ("CompanyName", "The Snowfall contributors"),
         ("FileDescription", description),
         ("FileVersion", version),
-        ("InternalName", "Snowhush"),
-        ("LegalCopyright", "© 2026 Mykhailo Bezruchko"),
+        ("InternalName", "Snowfall"),
+        ("LegalCopyright", "© 2026 The Snowfall contributors"),
         ("OriginalFilename", filename),
-        ("ProductName", "Snowhush"),
+        ("ProductName", "Snowfall"),
         ("ProductVersion", version),
     ]
     .map(|(key, text)| {
@@ -114,7 +114,7 @@ fn manifest(version: &str) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity type="win32" name="Snowhush" version="{}"/>
+  <assemblyIdentity type="win32" name="Snowfall" version="{}"/>
   <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
     <application>
       <supportedOS Id="{{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}}"/>
