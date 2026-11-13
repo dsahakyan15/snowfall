@@ -58,11 +58,10 @@ impl Store for Registry {
     }
 }
 
-/// Registers this executable to start at login, or removes it. An entry left by a copy elsewhere is pointed here.
-pub fn set_open_at_login(on: bool) {
+/// Registers this executable to start at login, or removes the entry; returns whether that worked.
+pub fn set_open_at_login(on: bool) -> bool {
     let status = if on {
         match command() {
-            Some(command) if read_text(RUN, RUN_VALUE).as_deref() == Some(command.as_str()) => ERROR_SUCCESS,
             Some(command) => write_text(RUN, RUN_VALUE, &command),
             None => WIN32_ERROR(1),
         }
@@ -75,6 +74,12 @@ pub fn set_open_at_login(on: bool) {
     if status != ERROR_SUCCESS {
         log!("open at login {on}: {status:?}");
     }
+    status == ERROR_SUCCESS
+}
+
+/// Whether settings were ever saved: false on a profile that has never run Snowfall.
+pub fn has_settings() -> bool {
+    Registry.number("openAtLogin").is_some()
 }
 
 /// The quoted path of this executable.

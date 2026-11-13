@@ -110,9 +110,13 @@ pub fn run() -> Result<()> {
         let window = CreateWindowExW(WINDOW_EX_STYLE(0), CLASS, w!("Snowfall"), WS_OVERLAPPED, 0, 0, 0, 0, None, None, Some(instance.into()), None)?;
         TASKBAR_CREATED.store(RegisterWindowMessageW(w!("TaskbarCreated")), Ordering::Relaxed);
 
-        let settings = Settings::load(&Registry);
-        // The entry follows the setting, and follows the executable when it moves.
-        registry::set_open_at_login(settings.open_at_login);
+        let mut settings = Settings::load(&Registry);
+        // The first run registers autostart, as Open at login is on by default; later runs leave the entry alone,
+        // so starting another copy, such as a development build, never takes it over.
+        if !registry::has_settings() {
+            settings.open_at_login = registry::set_open_at_login(settings.open_at_login);
+            settings.save(&mut Registry);
+        }
         let (commands, receiver) = mpsc::channel();
         let wake = CreateEventW(None, false, false, None)?;
         let links = Links { wake: wake.0 as isize, controller: window.0 as isize };
@@ -262,12 +266,15 @@ fn choose(window: HWND, action: Action) {
         }),
         Action::Change(change) => APP.with_borrow_mut(|app| {
             let Some(app) = app else { return };
+            log!("{change:?}");
+            // The menu shows the setting, so it only changes once the autostart entry did.
+            if let Change::OpenAtLogin(on) = change
+                && !registry::set_open_at_login(on)
+            {
+                return;
+            }
             app.settings.apply(&change);
             app.settings.save(&mut Registry);
-            log!("{change:?}");
-            if let Change::OpenAtLogin(on) = change {
-                registry::set_open_at_login(on);
-            }
             send(app, Command::Settings(app.settings.clone()));
         }),
     }

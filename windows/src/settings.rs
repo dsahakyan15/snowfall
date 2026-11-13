@@ -98,14 +98,14 @@ pub enum Change {
 
 impl Settings {
     pub fn apply(&mut self, change: &Change) {
-        match change.clone() {
+        match *change {
             Change::Level(level) => self.level = level,
             Change::Wind(wind) => self.wind = wind,
-            Change::Screen(screen, true) => {
-                self.screens_off.remove(&screen);
+            Change::Screen(ref screen, true) => {
+                self.screens_off.remove(screen);
             }
-            Change::Screen(screen, false) => {
-                self.screens_off.insert(screen);
+            Change::Screen(ref screen, false) => {
+                self.screens_off.insert(screen.clone());
             }
             Change::Opacity(opacity) => self.opacity = opacity,
             Change::Melt(on) => self.melt = on,
