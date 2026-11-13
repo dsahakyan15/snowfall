@@ -16,7 +16,7 @@ fn main() {
     fs::create_dir_all(assets.join("tray")).expect("assets folder");
     for size in TRAY_SIZES {
         for (name, color) in [("white", [255, 255, 255]), ("black", [0, 0, 0])] {
-            let pixels = render(size, |coverage, _| [color[0], color[1], color[2], to_byte(coverage)], 0.9);
+            let pixels = render(size, |coverage| [color[0], color[1], color[2], to_byte(coverage)], 0.9);
             fs::write(assets.join(format!("tray/snowflake-{name}-{size}.png")), png(size, &pixels)).expect("tray glyph");
         }
     }
@@ -27,7 +27,7 @@ fn main() {
 
 /// The app icon: a white snowflake on a rounded square of winter-sky blue, lighter at the top.
 fn app_icon(size: u32) -> Vec<u8> {
-    let flake = render(size, |coverage, _| [255, 255, 255, to_byte(coverage)], 0.74);
+    let flake = render(size, |coverage| [255, 255, 255, to_byte(coverage)], 0.74);
     let mut out = Vec::with_capacity(flake.len());
     let n = size as f32;
     for y in 0..size {
@@ -53,7 +53,7 @@ fn app_icon(size: u32) -> Vec<u8> {
 }
 
 /// Renders the snowflake, `scale` of the image across, colouring each pixel from its coverage.
-fn render(size: u32, color: impl Fn(f32, (u32, u32)) -> [u8; 4], scale: f32) -> Vec<u8> {
+fn render(size: u32, color: impl Fn(f32) -> [u8; 4], scale: f32) -> Vec<u8> {
     const SAMPLES: u32 = 6;
     let n = size as f32;
     // Strokes no thinner than about a pixel and a quarter, so small glyphs stay legible.
@@ -72,7 +72,7 @@ fn render(size: u32, color: impl Fn(f32, (u32, u32)) -> [u8; 4], scale: f32) -> 
                     }
                 }
             }
-            pixels.extend(color(hits as f32 / (SAMPLES * SAMPLES) as f32, (x, y)));
+            pixels.extend(color(hits as f32 / (SAMPLES * SAMPLES) as f32));
         }
     }
     pixels

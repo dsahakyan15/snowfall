@@ -24,6 +24,8 @@ use windows_numerics::Matrix3x2;
 use snowfall_core::simulation::{COLUMN_WIDTH, SnowSimulation, Sprite};
 
 const SHADERS: &str = include_str!("shaders.hlsl");
+/// How many windows in front of a Pile the pile shader can cut it away for; the shader's `occluders` array is this long.
+const MAX_OCCLUDERS: usize = 16;
 
 // The sprites' input layout below reads each field at these offsets.
 const _: () = assert!(
@@ -53,7 +55,7 @@ struct Uniforms {
     height_offset: i32,
     light: [f32; 4],
     shadow_tint: [f32; 4],
-    occluders: [[f32; 4]; 16],
+    occluders: [[f32; 4]; MAX_OCCLUDERS],
 }
 
 const _: () = assert!(offset_of!(Uniforms, light) == 48 && offset_of!(Uniforms, occluders) == 80 && size_of::<Uniforms>() % 16 == 0);
@@ -291,7 +293,7 @@ impl Surface {
                 height_offset: 0,
                 light: [ambient.light[0], ambient.light[1], ambient.light[2], 1.0],
                 shadow_tint: ambient.shadow_tint,
-                occluders: [[0.0; 4]; 16],
+                occluders: [[0.0; 4]; MAX_OCCLUDERS],
             };
 
             if !piles.is_empty() {
@@ -305,8 +307,9 @@ impl Surface {
                     uniforms.pile_bottom = pile.bottom;
                     uniforms.origin = [pile.origin.x, pile.origin.y];
                     uniforms.height_offset = pile.offset as i32;
-                    uniforms.occluder_count = pile.occluders.len().min(16) as i32;
-                    uniforms.occluders[..pile.occluders.len().min(16)].copy_from_slice(&pile.occluders[..pile.occluders.len().min(16)]);
+                    let occluders = pile.occluders.len().min(MAX_OCCLUDERS);
+                    uniforms.occluder_count = occluders as i32;
+                    uniforms.occluders[..occluders].copy_from_slice(&pile.occluders[..occluders]);
                     gpu.write(&gpu.uniforms, &uniforms)?;
                     context.Draw(4, 0);
                 }

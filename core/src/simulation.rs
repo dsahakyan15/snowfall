@@ -925,7 +925,7 @@ impl SnowSimulation {
     // Piles
 
     fn settle(&mut self, dt: f32) {
-        // Melting nearly keeps pace with the snowfall, so heavier snowfall builds drifts only a little higher.
+        // Melting nearly keeps pace with the snowfall, so heavier snowfall builds Piles only a little higher.
         let falling = self.snowfall.flakes_per_megapoint() * self.air.strength * self.density;
         let melt_pace = if falling > 0.0 { (falling / THAW_BALANCE).powf(THAW_EXPONENT) } else { 1.0 };
         let outside: Vec<[f32; 2]> = (0..self.layers.len())

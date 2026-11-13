@@ -11,7 +11,7 @@ cbuffer Uniforms : register(b0) {
     int heightOffset;
     float4 light;
     float4 shadowTint;
-    float4 occluders[16];
+    float4 occluders[16]; // MAX_OCCLUDERS in render.rs
 };
 
 Buffer<float> heights : register(t0);
