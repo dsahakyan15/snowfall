@@ -7,11 +7,11 @@ use windows::Win32::System::Registry::{
 use windows::Win32::UI::WindowsAndMessaging::{SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW};
 use windows::core::{BOOL, PCWSTR, w};
 
-use snowhush_core::simulation::Snowfall;
+use snowfall_core::simulation::Snowfall;
 
-const KEY: PCWSTR = w!("Software\\Snowhush");
+const KEY: PCWSTR = w!("Software\\Snowfall");
 const RUN: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
-const RUN_VALUE: PCWSTR = w!("Snowhush");
+const RUN_VALUE: PCWSTR = w!("Snowfall");
 
 #[derive(Clone, Copy)]
 pub struct Settings {
@@ -23,11 +23,6 @@ pub struct Settings {
     /// The snow settles at the bottom of the screen, under the taskbar, for a taskbar made see-through, as by TranslucentTB.
     pub behind_taskbar: bool,
     pub show_in_screenshots: bool,
-    pub welcomed: bool,
-    /// Whether the snow turns spooky on Halloween.
-    pub halloween: bool,
-    /// Whether leaves fall instead of snow.
-    pub autumn: bool,
 }
 
 impl Settings {
@@ -42,9 +37,6 @@ impl Settings {
             behind_windows: read(w!("behindWindows")).is_some_and(|v| v != 0),
             behind_taskbar: read(w!("behindTaskbar")).is_some_and(|v| v != 0),
             show_in_screenshots: read(w!("showInScreenshots")).is_some_and(|v| v != 0),
-            welcomed: read(w!("welcomed")).is_some_and(|v| v != 0),
-            halloween: read(w!("halloween")).is_none_or(|v| v != 0),
-            autumn: read(w!("autumn")).is_some_and(|v| v != 0),
         }
     }
 
@@ -57,9 +49,6 @@ impl Settings {
         write(w!("behindWindows"), self.behind_windows as u32);
         write(w!("behindTaskbar"), self.behind_taskbar as u32);
         write(w!("showInScreenshots"), self.show_in_screenshots as u32);
-        write(w!("welcomed"), self.welcomed as u32);
-        write(w!("halloween"), self.halloween as u32);
-        write(w!("autumn"), self.autumn as u32);
     }
 }
 

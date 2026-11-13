@@ -19,18 +19,17 @@ use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{BOOL, Error, PCWSTR, Result, w};
 
-use snowhush_core::geometry::V2;
-use snowhush_core::halloween::moonlit;
-use snowhush_core::simulation::{Pace, SnowSimulation, WindowId, WindowSurface};
+use snowfall_core::geometry::V2;
+use snowfall_core::simulation::{Pace, SnowSimulation, WindowId, WindowSurface};
 
 use crate::desktop::DesktopLayer;
 use crate::light::{Backdrop, Sky, Wallpapers};
 use crate::log;
 use crate::prefs::Settings;
-use crate::render::{Ambient, Gpu, LANTERN_REACH, Surface};
+use crate::render::{Ambient, Gpu, Surface};
 use crate::tracker::{COVER_ONLY, Tracker, class_name, cloaked, process_name};
 
-const CLASS: PCWSTR = w!("SnowhushOverlay");
+const CLASS: PCWSTR = w!("SnowfallOverlay");
 
 thread_local! {
     /// Set by an overlay window when the displays change under it.
@@ -183,7 +182,7 @@ pub fn listen() -> Result<Listener> {
         let window = CreateWindowExW(
             WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             CLASS,
-            w!("Snowhush"),
+            w!("Snowfall"),
             WS_POPUP,
             0,
             0,
@@ -225,8 +224,6 @@ pub struct Screen {
     shadow_tint: [f32; 4],
     layer: Option<DesktopLayer>,
     behind_taskbar: bool,
-    /// Where the cursor's candlelight was last drawn.
-    lantern_at: V2,
 }
 
 impl Screen {
@@ -262,7 +259,6 @@ impl Screen {
             shadow_tint: [0.0; 4],
             layer,
             behind_taskbar: settings.behind_taskbar,
-            lantern_at: V2::new(-10_000.0, -10_000.0),
         })
     }
 
@@ -299,10 +295,6 @@ impl Screen {
             self.next_due = now + clock.frequency;
             return Ok(false);
         }
-        // The lantern follows the cursor even over snow that lies still, on the display it lights.
-        let lantern_moved = sky.night > 0.0 && (cursor - self.lantern_at).length() > 0.5 && (self.lit_by(cursor) || self.lit_by(self.lantern_at));
-        self.lantern_at = cursor;
-
         let fastest = if budget == PowerBudget::Full { self.interactive_rate } else { self.interactive_rate.min(60) };
         // 24 only where it divides the display's rate evenly; elsewhere it would judder.
         let calm = if budget == PowerBudget::Saver && self.interactive_rate % 24 == 0 { 24 } else { 30 };
@@ -311,24 +303,15 @@ impl Screen {
             Pace::Lively => fastest.min(60),
             Pace::Interactive => fastest,
         };
-        let rate = if lantern_moved { rate.max(fastest.min(60)) } else { rate };
         self.next_due = clock.schedule(now, rate);
-        self.idle_frames = if changed || lantern_moved { 0 } else { self.idle_frames + 1 };
+        self.idle_frames = if changed { 0 } else { self.idle_frames + 1 };
         // A still pile only needs a slow refresh for its glints.
-        if !(changed || lantern_moved || ((self.simulation.has_snow() || !self.simulation.pumpkins().is_empty()) && self.idle_frames % 2 == 0)) {
+        if !(changed || (self.simulation.has_snow() && self.idle_frames % 2 == 0)) {
             return Ok(false);
         }
-        // Halloween night: cold moonlight, violet shadows and a candle's glow along the drifts' edges.
-        let (light, shadow_tint) = moonlit(sky.daylight, self.shadow_tint, sky.night);
-        let ambient = Ambient { light, shadow_tint, rim: [1.0, 0.56, 0.2, 0.3 * sky.night], lantern: (cursor, sky.night) };
+        let ambient = Ambient { light: sky.daylight, shadow_tint: self.shadow_tint };
         self.surface.draw(gpu, &self.simulation, ambient, time)?;
         Ok(true)
-    }
-
-    /// Whether a candle at this point, in overlay coordinates, lights anything on this display.
-    fn lit_by(&self, at: V2) -> bool {
-        let reach = LANTERN_REACH * 3.0;
-        at.x > -reach && at.y > -reach && at.x < self.simulation.width() + reach && at.y < self.simulation.height() + reach
     }
 
     /// Hands the simulation the windows on this display when they changed.
@@ -337,7 +320,6 @@ impl Screen {
             return;
         }
         self.windows_seen = tracker.generation;
-        self.simulation.covers = tracker.covers(&self.monitor.rect, self.size);
         let surfaces = tracker.surfaces(&self.monitor.rect, self.size);
         if surfaces == self.surfaces {
             return;
@@ -360,7 +342,6 @@ impl Screen {
 
     pub fn drop_window_snow(&mut self) {
         self.simulation.update_windows(&[], 0.1, &HashSet::new(), &HashSet::new(), false);
-        self.simulation.covers.clear();
         self.surfaces.clear();
         self.windows_seen = 0;
     }
@@ -457,11 +438,6 @@ impl Screen {
         let rect = &self.monitor.rect;
         let (width, height) = physical_size(&self.monitor);
         V2::new((x - rect.left as f32) * self.size.0 as f32 / width as f32, (rect.bottom as f32 - y) * self.size.1 as f32 / height as f32)
-    }
-
-    pub fn contains(&self, x: f32, y: f32) -> bool {
-        let bounds = &self.monitor.bounds;
-        x >= bounds.left as f32 && x < bounds.right as f32 && y >= bounds.top as f32 && y < bounds.bottom as f32
     }
 }
 
@@ -599,7 +575,7 @@ fn create_overlay(rect: &RECT, shown_in_screenshots: bool) -> Result<HWND> {
         let window = CreateWindowExW(
             WS_EX_NOREDIRECTIONBITMAP | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             CLASS,
-            w!("Snowhush"),
+            w!("Snowfall"),
             WS_POPUP,
             rect.left,
             rect.top,
@@ -631,7 +607,7 @@ fn create_behind(rect: &RECT, layer: &DesktopLayer) -> Result<HWND> {
         let window = CreateWindowExW(
             WS_EX_NOREDIRECTIONBITMAP | WS_EX_LAYERED | WS_EX_NOACTIVATE,
             CLASS,
-            w!("Snowhush"),
+            w!("Snowfall"),
             WS_CHILD | WS_VISIBLE | WS_DISABLED,
             origin.x,
             origin.y,
