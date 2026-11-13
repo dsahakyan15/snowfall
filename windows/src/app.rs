@@ -12,7 +12,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Power::{POWERBROADCAST_SETTING, RegisterPowerSettingNotification};
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 use windows::Win32::System::RemoteDesktop::{NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification};
-use windows::Win32::System::SystemServices::GUID_CONSOLE_DISPLAY_STATE;
+use windows::Win32::System::SystemServices::{GUID_CONSOLE_DISPLAY_STATE, GUID_POWER_SAVING_STATUS};
 use windows::Win32::System::Threading::{CreateEventW, SetEvent};
 use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetSystemMetricsForDpi};
 use windows::Win32::UI::Shell::{
@@ -128,6 +128,7 @@ pub fn run() -> Result<()> {
         add_tray_icon(window, icon);
         let _ = WTSRegisterSessionNotification(window, NOTIFY_FOR_THIS_SESSION);
         let _ = RegisterPowerSettingNotification(HANDLE(window.0), &GUID_CONSOLE_DISPLAY_STATE, DEVICE_NOTIFY_WINDOW_HANDLE);
+        let _ = RegisterPowerSettingNotification(HANDLE(window.0), &GUID_POWER_SAVING_STATUS, DEVICE_NOTIFY_WINDOW_HANDLE);
         APP.set(Some(App { settings, commands, wake, snow, icon, light, locked: false, display_off: false, away: false }));
 
         let mut message = MSG::default();
@@ -160,11 +161,18 @@ unsafe extern "system" fn procedure(window: HWND, message: u32, wparam: WPARAM, 
             });
             LRESULT(0)
         }
+        // Plugged in or unplugged.
+        WM_POWERBROADCAST if wparam.0 as u32 == PBT_APMPOWERSTATUSCHANGE => {
+            power_changed();
+            LRESULT(1)
+        }
         WM_POWERBROADCAST if wparam.0 as u32 == PBT_POWERSETTINGCHANGE => {
             let setting = unsafe { &*(lparam.0 as *const POWERBROADCAST_SETTING) };
             if setting.PowerSetting == GUID_CONSOLE_DISPLAY_STATE {
                 let off = setting.Data[0] == 0;
                 update(|app| app.display_off = off);
+            } else if setting.PowerSetting == GUID_POWER_SAVING_STATUS {
+                power_changed();
             }
             LRESULT(1)
         }
@@ -196,6 +204,15 @@ fn update(change: impl FnOnce(&mut App)) {
         change(app);
         let active = !app.locked && !app.display_off && !app.away;
         send(app, Command::Active(active));
+    });
+}
+
+/// Lets the snow thread know at once, so Pause on battery stops and starts the snow without waiting.
+fn power_changed() {
+    APP.with_borrow(|app| {
+        if let Some(app) = app {
+            send(app, Command::PowerChanged);
+        }
     });
 }
 

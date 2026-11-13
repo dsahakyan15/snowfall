@@ -5,6 +5,7 @@ mod desktop;
 mod light;
 mod log;
 mod menu;
+mod power;
 mod registry;
 mod render;
 mod screen;
