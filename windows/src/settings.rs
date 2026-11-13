@@ -6,17 +6,8 @@ use std::collections::BTreeSet;
 #[cfg(test)]
 use std::collections::HashMap;
 
-/// How much snow falls.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Level {
-    Off,
-    Snow,
-    HeavySnow,
-}
-
-impl Level {
-    pub const ALL: [Level; 3] = [Level::Off, Level::Snow, Level::HeavySnow];
-}
+/// How much snow falls: the engine's own levels.
+pub use snowfall_core::simulation::Snowfall as Level;
 
 /// Which way, and how hard, the wind blows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,7 +118,7 @@ impl Settings {
         let defaults = Settings::default();
         let flag = |name: &str, default: bool| store.number(name).map_or(default, |value| value != 0);
         Settings {
-            level: store.number("level").and_then(|i| Level::ALL.get(i as usize).copied()).unwrap_or(defaults.level),
+            level: store.number("level").and_then(level_from_code).unwrap_or(defaults.level),
             wind: store.number("wind").and_then(|i| Wind::ALL.get(i as usize).copied()).unwrap_or(defaults.wind),
             screens_off: store
                 .text("screensOff")
@@ -146,7 +137,7 @@ impl Settings {
 
     pub fn save(&self, store: &mut impl Store) {
         let index = |position: Option<usize>| position.unwrap_or(0) as u32;
-        store.set_number("level", index(Level::ALL.iter().position(|&level| level == self.level)));
+        store.set_number("level", level_code(self.level));
         store.set_number("wind", index(Wind::ALL.iter().position(|&wind| wind == self.wind)));
         store.set_text("screensOff", &self.screens_off.iter().cloned().collect::<Vec<_>>().join("\n"));
         store.set_number("opacity", self.opacity.0 as u32);
@@ -158,6 +149,19 @@ impl Settings {
         store.set_number("showInScreenshots", self.show_in_screenshots as u32);
         store.set_number("openAtLogin", self.open_at_login as u32);
     }
+}
+
+/// How a level is stored: fixed codes, so the engine can reorder or add levels without changing saved settings.
+fn level_code(level: Level) -> u32 {
+    match level {
+        Level::Off => 0,
+        Level::Snow => 1,
+        Level::HeavySnow => 2,
+    }
+}
+
+fn level_from_code(code: u32) -> Option<Level> {
+    [Level::Off, Level::Snow, Level::HeavySnow].into_iter().find(|&level| level_code(level) == code)
 }
 
 /// Where settings are kept between runs: named numbers and texts.

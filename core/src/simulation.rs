@@ -56,35 +56,25 @@ const SLIDE_DRAG: f32 = 0.025;
 const SLIDE_WIND_MAX: f32 = 160.0;
 const SLIDE_CALM: f32 = 0.35;
 
+/// How much snow falls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Snowfall {
+    /// Nothing new falls; what is already in the air finishes falling.
     Off,
-    Light,
-    Steady,
-    Heavy,
-    Variable,
+    /// A steady snowfall: the default.
+    Snow,
+    /// A blizzard, about three times as dense as Snow.
+    HeavySnow,
 }
 
 impl Snowfall {
-    pub const ALL: [Snowfall; 5] = [Snowfall::Off, Snowfall::Light, Snowfall::Steady, Snowfall::Heavy, Snowfall::Variable];
-
-    pub fn title(self) -> &'static str {
-        match self {
-            Snowfall::Off => "Off",
-            Snowfall::Light => "Light",
-            Snowfall::Steady => "Steady",
-            Snowfall::Heavy => "Heavy",
-            Snowfall::Variable => "Variable",
-        }
-    }
+    pub const ALL: [Snowfall; 3] = [Snowfall::Off, Snowfall::Snow, Snowfall::HeavySnow];
 
     fn flakes_per_megapoint(self) -> f32 {
         match self {
             Snowfall::Off => 0.0,
-            Snowfall::Light => 150.0,
-            Snowfall::Steady => 380.0,
-            Snowfall::Heavy => 800.0,
-            Snowfall::Variable => 380.0,
+            Snowfall::Snow => 380.0,
+            Snowfall::HeavySnow => 1200.0,
         }
     }
 }
@@ -216,7 +206,6 @@ struct Air {
     motes: Vec<Mote>,
     random: Random,
     clock: f64,
-    strength: f32,
     cursor: Option<V2>,
     cursor_velocity: V2,
     held_layers: Vec<usize>,
@@ -253,8 +242,6 @@ pub struct SnowSimulation {
     parking: Vec<(WindowId, SnowLayer, f64)>,
     space_changed_at: f64,
     target_flakes: usize,
-    strength_target: f32,
-    next_shift: f64,
     air: Air,
 }
 
@@ -277,15 +264,12 @@ impl SnowSimulation {
             parking: Vec::new(),
             space_changed_at: -10.0,
             target_flakes: 0,
-            strength_target: 1.0,
-            next_shift: 0.0,
             air: Air {
                 flakes: Vec::new(),
                 grains: Vec::new(),
                 motes: Vec::new(),
                 random: Random::new(),
                 clock: 0.0,
-                strength: 1.0,
                 cursor: None,
                 cursor_velocity: V2::ZERO,
                 held_layers: Vec::new(),
@@ -315,16 +299,15 @@ impl SnowSimulation {
         self.pace
     }
 
+    /// Turning the snowfall off lets the flakes on screen finish falling; those still waiting above the top edge,
+    /// which would look like new snow coming in, are let go.
     pub fn set_snowfall(&mut self, snowfall: Snowfall) {
-        if snowfall == Snowfall::Variable && self.snowfall != Snowfall::Variable {
-            self.next_shift = self.air.clock;
-        }
-        if snowfall != Snowfall::Variable {
-            self.air.strength = 1.0;
-            self.strength_target = 1.0;
-        }
         self.snowfall = snowfall;
         self.update_target();
+        if snowfall == Snowfall::Off {
+            let top = self.height;
+            self.air.flakes.retain(|flake| flake.position.y - flake.size <= top);
+        }
     }
 
     /// Scales the snowfall; flakes come and go through the usual cycle, so a change shows gradually.
@@ -374,7 +357,6 @@ impl SnowSimulation {
         let was_moving = self.sprite_count() > 0;
         self.air.heights_changed = false;
 
-        self.vary(dt);
         let wind = self.air.slide_wind;
         self.air.slide_wind = if wind.abs() < 1.0 { 0.0 } else { wind * (-dt / SLIDE_CALM).exp() };
         self.expire_parking();
@@ -790,29 +772,6 @@ impl SnowSimulation {
         self.air.blowing()
     }
 
-    /// Wanders between light lulls, steady snow and heavy flurries.
-    fn vary(&mut self, dt: f32) {
-        if self.snowfall != Snowfall::Variable {
-            self.strength_target = 1.0;
-        } else if self.air.clock >= self.next_shift {
-            let random = &mut self.air.random;
-            let roll = random.next();
-            self.strength_target = if roll < 0.25 {
-                random.range(0.25, 0.5)
-            } else if roll < 0.75 {
-                random.range(0.7, 1.3)
-            } else {
-                random.range(1.5, 2.1)
-            };
-            self.next_shift = self.air.clock + random.range(60.0, 240.0) as f64;
-        }
-        if (self.strength_target - self.air.strength).abs() <= 0.001 {
-            return;
-        }
-        self.air.strength += (self.strength_target - self.air.strength) * (1.0 - (-dt / 25.0).exp());
-        self.update_target();
-    }
-
     // Gust
 
     /// The way the breeze blows now: 1 to the right, -1 to the left.
@@ -926,7 +885,7 @@ impl SnowSimulation {
 
     fn settle(&mut self, dt: f32) {
         // Melting nearly keeps pace with the snowfall, so heavier snowfall builds Piles only a little higher.
-        let falling = self.snowfall.flakes_per_megapoint() * self.air.strength * self.density;
+        let falling = self.snowfall.flakes_per_megapoint() * self.density;
         let melt_pace = if falling > 0.0 { (falling / THAW_BALANCE).powf(THAW_EXPONENT) } else { 1.0 };
         let outside: Vec<[f32; 2]> = (0..self.layers.len())
             .map(|li| if li == 0 { [0.0; 2] } else { [outside(&self.layers, li, true), outside(&self.layers, li, false)] })
@@ -968,7 +927,7 @@ impl SnowSimulation {
 
     fn update_target(&mut self) {
         let per_megapoint = self.snowfall.flakes_per_megapoint();
-        self.target_flakes = (per_megapoint * self.air.strength * self.density * self.width * self.height / 1_000_000.0) as usize;
+        self.target_flakes = (per_megapoint * self.density * self.width * self.height / 1_000_000.0) as usize;
     }
 }
 
@@ -1503,8 +1462,7 @@ impl Air {
 
     fn breeze(&self) -> f32 {
         let t = self.clock;
-        let breeze = (10.0 * (t * 0.07).sin() + 6.0 * (t * 0.19 + 1.7).sin() + 3.0 * (t * 0.43 + 4.1).sin()) as f32;
-        breeze * (0.6 + 0.4 * self.strength)
+        (10.0 * (t * 0.07).sin() + 6.0 * (t * 0.19 + 1.7).sin() + 3.0 * (t * 0.43 + 4.1).sin()) as f32
     }
 
     fn gust_speed(&self) -> f32 {

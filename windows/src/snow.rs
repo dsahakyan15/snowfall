@@ -13,14 +13,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{HSTRING, PCWSTR, Result, w};
 
-use snowfall_core::simulation::{SnowSimulation, Snowfall};
+use snowfall_core::simulation::SnowSimulation;
 
 use crate::desktop::{self, DesktopLayer};
 use crate::light::{Sky, Wallpapers};
 use crate::log;
 use crate::render::Gpu;
 use crate::screen::{BACKDROP_CHANGED, Clock, DISPLAYS_CHANGED, Monitor, PowerBudget, Screen, dip_size, listen, monitors, walls, watch_taskbar};
-use crate::settings::{Level, Settings};
+use crate::settings::Settings;
 use crate::tracker::{self, Tracker};
 
 pub enum Command {
@@ -88,7 +88,7 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
                     if settings.level != previous.level {
                         let now = Clock::now();
                         screens.iter_mut().for_each(|screen| {
-                            screen.simulation.set_snowfall(engine_level(settings.level));
+                            screen.simulation.set_snowfall(settings.level);
                             screen.wake(now);
                         });
                     }
@@ -298,7 +298,7 @@ fn find_layer() -> Option<DesktopLayer> {
 
 fn new_simulation(monitor: &Monitor, settings: &Settings) -> SnowSimulation {
     let (width, height) = dip_size(monitor);
-    let mut simulation = SnowSimulation::new(width as f32, height as f32, engine_level(settings.level));
+    let mut simulation = SnowSimulation::new(width as f32, height as f32, settings.level);
     simulation.thaws = settings.melt;
     simulation
 }
@@ -358,14 +358,5 @@ impl Stats {
         *self = Stats::new(now);
         tracker.listings = 0;
         tracker.cost = 0;
-    }
-}
-
-/// The engine's snowfall for a menu level.
-fn engine_level(level: Level) -> Snowfall {
-    match level {
-        Level::Off => Snowfall::Off,
-        Level::Snow => Snowfall::Steady,
-        Level::HeavySnow => Snowfall::Heavy,
     }
 }
