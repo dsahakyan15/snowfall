@@ -63,12 +63,12 @@ const SLIDE_WIND_MAX: f32 = 160.0;
 const SLIDE_CALM: f32 = 0.35;
 /// How far a steady wind carries loose powder, as a share of its speed.
 const WIND_CARRY: f32 = 0.5;
-/// How hard a strong wind skims the drifts, on the scale a sliding desktop's wind uses.
+/// How hard a strong wind skims the Piles, on the scale a sliding desktop's wind uses.
 const WIND_SKIM: f32 = 0.3;
 /// The share of a column's loose snow a strong wind rolls on to the next column downwind each second.
 const WIND_CREEP: f32 = 1.2;
 /// The share of the snow a strong wind rolls on that packs where it arrives and moves no further: wind-packed
-/// snow, which lets the drifts come to rest.
+/// snow, which lets the Piles come to rest.
 const WIND_PACKING: f32 = 0.02;
 /// How far a crest has to stand above the snow around it for a strong steady wind to skim it.
 const WIND_CREST: f32 = 2.0;
@@ -120,7 +120,7 @@ impl Wind {
         }
     }
 
-    /// A strong wind also works on the drifts: it skims their crests and rolls loose snow along them.
+    /// A strong wind also works on the Piles: it skims their crests and rolls loose snow along them.
     /// A light wind leaves them be.
     fn strong(self) -> bool {
         matches!(self, Wind::StrongLeft | Wind::StrongRight)
@@ -279,8 +279,8 @@ pub struct SnowSimulation {
     snowfall: Snowfall,
     density: f32,
     pub thaws: bool,
-    /// Snow on windows melts away as it lands, and the Ground keeps only a thin layer; apart from `thaws`.
-    pub keeps_windows_clear: bool,
+    /// Snow on windows melts as it lands, and the Ground keeps only a thin Pile; apart from `thaws`.
+    keeps_windows_clear: bool,
     pub accumulates: bool,
     /// Side edges, left and right, with no display past them: a window slid past one leaves its snow heaped against the edge.
     pub walls: (bool, bool),
@@ -361,6 +361,15 @@ impl SnowSimulation {
             let top = self.height;
             self.air.flakes.retain(|flake| flake.position.y - flake.size <= top);
         }
+    }
+
+    /// Keep windows clear: snow on windows melts as it lands and the Ground keeps only a thin Pile, apart from
+    /// `thaws`. Turning it on melts what lies on windows within seconds; what waits out of sight for its window goes.
+    pub fn set_keeps_windows_clear(&mut self, on: bool) {
+        if on && !self.keeps_windows_clear {
+            self.forget_hidden_snow();
+        }
+        self.keeps_windows_clear = on;
     }
 
     /// The flakes in the air turn with a new wind over a second or two, as they follow any change of wind.
@@ -846,7 +855,11 @@ impl SnowSimulation {
     pub fn blow_away(&mut self, direction: f32, calm: bool) {
         let direction = if direction < 0.0 { -1.0 } else { 1.0 };
         self.air.gust = Some(Gust { start: self.air.clock, direction, calm });
-        // Snow kept for windows on other desktops goes too, out of sight.
+        self.forget_hidden_snow();
+    }
+
+    /// Snow kept for windows out of sight, on other desktops or just gone, goes too.
+    fn forget_hidden_snow(&mut self) {
         self.dormant.clear();
         for (_, ledge, _) in &mut self.parking {
             for i in 0..ledge.count() {
@@ -916,7 +929,7 @@ impl SnowSimulation {
 
     /// The wind of a sliding desktop skims the drifts, most off the crests that stand above the snow around them:
     /// a little powder flies a short way downwind and settles again. A strong steady wind takes only the crests,
-    /// so once they are worn down the drifts lie still.
+    /// so once they are worn down the Piles lie still.
     fn skim(&mut self, dt: f32) {
         let sliding = self.air.slide_wind.abs() / SLIDE_WIND_MAX;
         let steady = if self.air.wind.strong() { WIND_SKIM } else { 0.0 };
@@ -964,9 +977,9 @@ impl SnowSimulation {
         }
     }
 
-    /// A strong steady wind rolls the loose snow along each Pile toward its downwind end: the upwind end thins and a
-    /// drift builds against the far one, up to just short of the slope snow holds at. A little of what arrives packs
-    /// down and moves no further, so without fresh snow the drifts come to rest.
+    /// A strong steady wind rolls the loose snow along each Pile toward its downwind end: the upwind end thins and the
+    /// Pile deepens against the far one, up to just short of the slope snow holds at. A little of what arrives packs
+    /// down and moves no further, so without fresh snow the Piles come to rest.
     /// Along an even Pile as much comes in as goes out, so only the ends change.
     fn creep(&mut self, dt: f32) {
         if !self.air.wind.strong() {
@@ -1012,25 +1025,12 @@ impl SnowSimulation {
         for (layer, outside) in self.layers.iter_mut().zip(outside) {
             layer.outside = outside;
         }
-        for (li, layer) in self.layers.iter_mut().enumerate() {
-            if !self.accumulates || self.thaws {
-                let floor = if !self.accumulates {
-                    0.0
-                } else if li == 0 {
-                    THAW_DEPTH
-                } else {
-                    LEDGE_THAW_DEPTH
-                };
-                if layer.thaw(dt * melt_pace, floor, THAW_RATE, THAW_TIME) {
-                    self.air.heights_changed = true;
-                }
-            }
-            if self.keeps_windows_clear {
-                let cleared =
-                    if li == 0 { layer.thaw(dt, CLEAR_GROUND_DEPTH, 0.0, CLEAR_GROUND_TIME) } else { layer.thaw(dt, 0.0, CLEAR_RATE, CLEAR_TIME) };
-                if cleared {
-                    self.air.heights_changed = true;
-                }
+        let melts: Vec<_> = (0..self.layers.len()).map(|li| self.melt(li, melt_pace)).collect();
+        for (layer, melt) in self.layers.iter_mut().zip(melts) {
+            if let Some((pace, floor, rate, time)) = melt
+                && layer.thaw(dt * pace, floor, rate, time)
+            {
+                self.air.heights_changed = true;
             }
             // Shaken harder than gravity, a granular pile fluidizes and slumps to a flatter slope.
             let steepest = REPOSE;
@@ -1048,6 +1048,24 @@ impl SnowSimulation {
                 self.air.release(layer.spill_right, edge_point(layer, false), velocity, V2::new(0.25, 1.0), 0.0);
                 layer.spill_right = 0.0;
             }
+        }
+    }
+
+    /// How the Pile on layer `li` melts, if at all: a pace that scales time, the depth it melts down to, a steady
+    /// rate below that, and the time constant of the melt above it. The Ground is layer 0, windows' Ledges the rest.
+    fn melt(&self, li: usize, melt_pace: f32) -> Option<(f32, f32, f32, f32)> {
+        let ground = li == 0;
+        if !self.accumulates {
+            Some((melt_pace, 0.0, THAW_RATE, THAW_TIME))
+        } else if self.keeps_windows_clear && !ground {
+            Some((1.0, 0.0, CLEAR_RATE, CLEAR_TIME))
+        } else if self.keeps_windows_clear {
+            // Under the thin Pile kept on the Ground, Melt goes on at its own slow rate.
+            Some((1.0, CLEAR_GROUND_DEPTH, if self.thaws { THAW_RATE * melt_pace } else { 0.0 }, CLEAR_GROUND_TIME))
+        } else if self.thaws {
+            Some((melt_pace, if ground { THAW_DEPTH } else { LEDGE_THAW_DEPTH }, THAW_RATE, THAW_TIME))
+        } else {
+            None
         }
     }
 

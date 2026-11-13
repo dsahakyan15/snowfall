@@ -85,29 +85,13 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
                 Command::Quit => return Ok(()),
                 Command::Settings(next) => {
                     let previous = std::mem::replace(&mut settings, next);
-                    if settings.level != previous.level {
+                    let snow = |s: &Settings| (s.level, s.wind, s.keep_windows_clear, s.melt);
+                    if snow(&settings) != snow(&previous) {
                         let now = Clock::now();
                         screens.iter_mut().for_each(|screen| {
-                            screen.simulation.set_snowfall(settings.level);
+                            configure(&mut screen.simulation, &settings);
                             screen.wake(now);
                         });
-                    }
-                    if settings.wind != previous.wind {
-                        let now = Clock::now();
-                        screens.iter_mut().for_each(|screen| {
-                            screen.simulation.set_wind(settings.wind);
-                            screen.wake(now);
-                        });
-                    }
-                    if settings.keep_windows_clear != previous.keep_windows_clear {
-                        let now = Clock::now();
-                        screens.iter_mut().for_each(|screen| {
-                            screen.simulation.keeps_windows_clear = settings.keep_windows_clear;
-                            screen.wake(now);
-                        });
-                    }
-                    if settings.melt != previous.melt {
-                        screens.iter_mut().for_each(|screen| screen.simulation.thaws = settings.melt);
                     }
                     if settings.behind_windows != previous.behind_windows {
                         layer = settings.behind_windows.then(find_layer).flatten();
@@ -313,10 +297,16 @@ fn find_layer() -> Option<DesktopLayer> {
 fn new_simulation(monitor: &Monitor, settings: &Settings) -> SnowSimulation {
     let (width, height) = dip_size(monitor);
     let mut simulation = SnowSimulation::new(width as f32, height as f32, settings.level);
-    simulation.thaws = settings.melt;
-    simulation.keeps_windows_clear = settings.keep_windows_clear;
-    simulation.set_wind(settings.wind);
+    configure(&mut simulation, settings);
     simulation
+}
+
+/// Gives a screen's snow the settings that shape it.
+fn configure(simulation: &mut SnowSimulation, settings: &Settings) {
+    simulation.set_snowfall(settings.level);
+    simulation.set_wind(settings.wind);
+    simulation.set_keeps_windows_clear(settings.keep_windows_clear);
+    simulation.thaws = settings.melt;
 }
 
 fn power_budget() -> PowerBudget {
