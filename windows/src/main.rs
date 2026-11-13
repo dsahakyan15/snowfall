@@ -4,10 +4,13 @@ mod app;
 mod desktop;
 mod light;
 mod log;
-mod prefs;
+mod menu;
+mod registry;
 mod render;
 mod screen;
+mod settings;
 mod snow;
+mod strings;
 mod tracker;
 
 use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};

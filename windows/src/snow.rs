@@ -18,21 +18,16 @@ use snowfall_core::simulation::{SnowSimulation, Snowfall};
 use crate::desktop::{self, DesktopLayer};
 use crate::light::{Sky, Wallpapers};
 use crate::log;
-use crate::prefs::Settings;
 use crate::render::Gpu;
 use crate::screen::{BACKDROP_CHANGED, Clock, DISPLAYS_CHANGED, Monitor, PowerBudget, Screen, dip_size, listen, monitors, walls, watch_taskbar};
+use crate::settings::{Level, Settings};
 use crate::tracker::{self, Tracker};
 
 pub enum Command {
-    Snowfall(Snowfall),
-    Accumulate(bool),
-    Melt(bool),
-    SnowOnWindows(bool),
-    BehindWindows(bool),
-    BehindTaskbar(bool),
+    /// The settings after the person changed one.
+    Settings(Settings),
     /// Explorer started again, taking the desktop's wallpaper layer with it.
     ShellRestarted,
-    ShowInScreenshots(bool),
     /// Off while the screen is locked, asleep or the session is away.
     Active(bool),
     /// Blows all the snow away; when calm, for less motion, melts it where it lies instead.
@@ -88,46 +83,31 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
         while let Ok(command) = commands.try_recv() {
             match command {
                 Command::Quit => return Ok(()),
-                Command::Snowfall(snowfall) => {
-                    settings.snowfall = snowfall;
-                    let now = Clock::now();
-                    screens.iter_mut().for_each(|screen| {
-                        screen.simulation.set_snowfall(snowfall);
-                        screen.wake(now);
-                    });
-                }
-                Command::Accumulate(on) => {
-                    settings.accumulate = on;
-                    screens.iter_mut().for_each(|screen| screen.simulation.accumulates = on);
-                }
-                Command::Melt(on) => {
-                    settings.melt = on;
-                    screens.iter_mut().for_each(|screen| screen.simulation.thaws = on);
-                }
-                Command::SnowOnWindows(on) => {
-                    settings.snow_on_windows = on;
-                    if !on {
-                        screens.iter_mut().for_each(Screen::drop_window_snow);
+                Command::Settings(next) => {
+                    let previous = std::mem::replace(&mut settings, next);
+                    if settings.level != previous.level {
+                        let now = Clock::now();
+                        screens.iter_mut().for_each(|screen| {
+                            screen.simulation.set_snowfall(engine_level(settings.level));
+                            screen.wake(now);
+                        });
                     }
-                }
-                Command::BehindWindows(on) => {
-                    settings.behind_windows = on;
-                    layer = on.then(find_layer).flatten();
-                    screens = sync_screens(&gpu, &settings, screens, layer, true);
-                }
-                Command::BehindTaskbar(on) => {
-                    settings.behind_taskbar = on;
-                    screens = sync_screens(&gpu, &settings, screens, layer, true);
+                    if settings.melt != previous.melt {
+                        screens.iter_mut().for_each(|screen| screen.simulation.thaws = settings.melt);
+                    }
+                    if settings.behind_windows != previous.behind_windows {
+                        layer = settings.behind_windows.then(find_layer).flatten();
+                        screens = sync_screens(&gpu, &settings, screens, layer, true);
+                    }
+                    if settings.show_in_screenshots != previous.show_in_screenshots {
+                        screens.iter().for_each(|screen| screen.show_in_screenshots(settings.show_in_screenshots));
+                    }
                 }
                 Command::ShellRestarted => {
                     if settings.behind_windows {
                         layer = find_layer();
                         screens = sync_screens(&gpu, &settings, screens, layer, true);
                     }
-                }
-                Command::ShowInScreenshots(on) => {
-                    settings.show_in_screenshots = on;
-                    screens.iter().for_each(|screen| screen.show_in_screenshots(on));
                 }
                 Command::ClearSnow(calm) => {
                     let direction = screens.first().map_or(-1.0, |screen| screen.simulation.breeze_direction());
@@ -176,7 +156,7 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
             chores_at = now + clock.frequency;
             clock.refresh();
             // In case a display change went unannounced.
-            let current = monitors(settings.behind_taskbar);
+            let current = monitors();
             if current.len() != screens.len() || screens.iter().any(|screen| !current.contains(&screen.monitor)) {
                 DISPLAYS_CHANGED.set(true);
             }
@@ -216,14 +196,14 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
 
         if active {
             // A drag starting is drawn right away instead of at the next calm frame.
-            if tracker.take_started_moving() && settings.snow_on_windows {
+            if tracker.take_started_moving() {
                 screens.iter_mut().for_each(|screen| screen.wake(now));
             }
             if screens.iter().any(|screen| screen.next_due <= now + clock.tolerance()) {
                 tracker.refresh(&clock, now);
             }
             // Behind the windows the snow still settles on them: what lies on a window's top edge is above it, in plain view.
-            let windows = settings.snow_on_windows.then_some(&tracker);
+            let windows = &tracker;
             let time = (clock.seconds(now - started) % 1000.0) as f32;
             let mut lost = false;
             for screen in screens.iter_mut().filter(|screen| screen.next_due <= now + clock.tolerance()) {
@@ -274,7 +254,7 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
 /// moves behind windows or back.
 fn sync_screens(gpu: &Gpu, settings: &Settings, mut current: Vec<Screen>, layer: Option<DesktopLayer>, rebuild: bool) -> Vec<Screen> {
     let mut result = Vec::new();
-    let displays = monitors(settings.behind_taskbar);
+    let displays = monitors();
     for monitor in displays.iter().cloned() {
         let kept = current.iter().position(|screen| screen.monitor.name == monitor.name);
         let simulation = match kept.map(|i| current.swap_remove(i)) {
@@ -318,9 +298,8 @@ fn find_layer() -> Option<DesktopLayer> {
 
 fn new_simulation(monitor: &Monitor, settings: &Settings) -> SnowSimulation {
     let (width, height) = dip_size(monitor);
-    let mut simulation = SnowSimulation::new(width as f32, height as f32, settings.snowfall);
+    let mut simulation = SnowSimulation::new(width as f32, height as f32, engine_level(settings.level));
     simulation.thaws = settings.melt;
-    simulation.accumulates = settings.accumulate;
     simulation
 }
 
@@ -379,5 +358,14 @@ impl Stats {
         *self = Stats::new(now);
         tracker.listings = 0;
         tracker.cost = 0;
+    }
+}
+
+/// The engine's snowfall for a menu level.
+fn engine_level(level: Level) -> Snowfall {
+    match level {
+        Level::Off => Snowfall::Off,
+        Level::Snow => Snowfall::Steady,
+        Level::HeavySnow => Snowfall::Heavy,
     }
 }

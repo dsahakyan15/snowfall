@@ -6,6 +6,7 @@ use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
 
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Globalization::GetUserDefaultUILanguage;
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Power::{POWERBROADCAST_SETTING, RegisterPowerSettingNotification};
@@ -19,26 +20,18 @@ use windows::Win32::UI::Shell::{
     Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{PCWSTR, Result, w};
+use windows::core::{HSTRING, PCWSTR, Result, w};
 
 use crate::log;
-use crate::prefs::{self, Settings};
+use crate::menu::{self, Action, Context, Item};
+use crate::registry::{self, Registry};
+use crate::settings::{Change, Settings};
 use crate::snow::{self, Command, Links};
-use snowfall_core::simulation::Snowfall;
+use crate::strings::Language;
 
 const CLASS: PCWSTR = w!("SnowfallController");
 const WM_TRAY: u32 = WM_APP + 1;
 const NIN_KEYSELECT: u32 = NIN_SELECT | 1;
-const ID_SNOWFALL: u32 = 100;
-const ID_ACCUMULATE: u32 = 200;
-const ID_MELT: u32 = 201;
-const ID_SCREENSHOTS: u32 = 202;
-const ID_LOGIN: u32 = 203;
-const ID_WINDOWS: u32 = 204;
-const ID_BEHIND: u32 = 205;
-const ID_QUIT: u32 = 299;
-const ID_CLEAR: u32 = 207;
-const ID_TASKBAR: u32 = 209;
 
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
@@ -117,11 +110,18 @@ pub fn run() -> Result<()> {
         let window = CreateWindowExW(WINDOW_EX_STYLE(0), CLASS, w!("Snowfall"), WS_OVERLAPPED, 0, 0, 0, 0, None, None, Some(instance.into()), None)?;
         TASKBAR_CREATED.store(RegisterWindowMessageW(w!("TaskbarCreated")), Ordering::Relaxed);
 
-        let settings = Settings::load();
+        let mut settings = Settings::load(&Registry);
+        // The first run registers autostart, as Open at login is on by default; later runs leave the entry alone,
+        // so starting another copy, such as a development build, never takes it over.
+        if !registry::has_settings() {
+            settings.open_at_login = registry::set_open_at_login(settings.open_at_login);
+            settings.save(&mut Registry);
+        }
         let (commands, receiver) = mpsc::channel();
         let wake = CreateEventW(None, false, false, None)?;
         let links = Links { wake: wake.0 as isize, controller: window.0 as isize };
-        let snow = thread::Builder::new().name("snow".into()).spawn(move || snow::run(receiver, links, settings)).ok();
+        let initial = settings.clone();
+        let snow = thread::Builder::new().name("snow".into()).spawn(move || snow::run(receiver, links, initial)).ok();
         let light = light_taskbar();
         let icon = tray_icon(light);
         add_tray_icon(window, icon);
@@ -206,96 +206,87 @@ fn send(app: &App, command: Command) {
 }
 
 fn show_menu(window: HWND, x: i32, y: i32) {
-    let Some(settings) = APP.with_borrow(|app| app.as_ref().map(|app| app.settings)) else { return };
-    let login = prefs::opens_at_login();
+    let Some(settings) = APP.with_borrow(|app| app.as_ref().map(|app| app.settings.clone())) else { return };
+    let language = Language::from_langid(unsafe { GetUserDefaultUILanguage() });
+    let items = menu::build(&settings, &Context { language, version: env!("CARGO_PKG_VERSION"), screens: &[] });
+    let mut actions = Vec::new();
     let chosen = unsafe {
-        let Ok(menu) = CreatePopupMenu() else { return };
-        let Ok(snowfall) = CreatePopupMenu() else { return };
-        for (i, option) in Snowfall::ALL.iter().enumerate() {
-            let title: Vec<u16> = option.title().encode_utf16().chain([0]).collect();
-            let _ = AppendMenuW(snowfall, MF_STRING, (ID_SNOWFALL + i as u32) as usize, PCWSTR(title.as_ptr()));
-        }
-        let current = Snowfall::ALL.iter().position(|&s| s == settings.snowfall).unwrap_or(0) as u32;
-        let last = ID_SNOWFALL + Snowfall::ALL.len() as u32 - 1;
-        let _ = CheckMenuRadioItem(snowfall, ID_SNOWFALL, last, ID_SNOWFALL + current, MF_BYCOMMAND.0);
-        let checked = |on: bool| if on { MF_CHECKED } else { MF_UNCHECKED };
-        let _ = AppendMenuW(menu, MF_POPUP, snowfall.0 as usize, w!("Intensity"));
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        let _ = AppendMenuW(menu, MF_STRING | checked(settings.accumulate), ID_ACCUMULATE as usize, w!("Accumulate"));
-        let melt = MF_STRING | checked(settings.melt) | if settings.accumulate { MF_ENABLED } else { MF_GRAYED };
-        let _ = AppendMenuW(menu, melt, ID_MELT as usize, w!("Melt Snow"));
-        let windows = MF_STRING | checked(settings.snow_on_windows);
-        let _ = AppendMenuW(menu, windows, ID_WINDOWS as usize, w!("Snow on Windows"));
-        let _ = AppendMenuW(menu, MF_STRING, ID_CLEAR as usize, w!("Clear Snow"));
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        let _ = AppendMenuW(menu, MF_STRING | checked(settings.behind_windows), ID_BEHIND as usize, w!("Behind Windows"));
-        let _ = AppendMenuW(menu, MF_STRING | checked(settings.behind_taskbar), ID_TASKBAR as usize, w!("Behind Taskbar"));
-        let _ = AppendMenuW(menu, MF_STRING | checked(settings.show_in_screenshots), ID_SCREENSHOTS as usize, w!("Show in Screenshots"));
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        let _ = AppendMenuW(menu, MF_STRING | checked(login), ID_LOGIN as usize, w!("Open at Login"));
-        let _ = AppendMenuW(menu, MF_STRING, ID_QUIT as usize, w!("Quit"));
-
+        let Some(menu) = native_menu(&items, &mut actions) else { return };
         // A tray menu only closes on an outside click while its owner is in the foreground.
         let _ = SetForegroundWindow(window);
-        let chosen = TrackPopupMenuEx(menu, (TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY).0, x, y, window, None).0 as u32;
+        let chosen = TrackPopupMenuEx(menu, (TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY).0, x, y, window, None).0 as usize;
         let _ = PostMessageW(Some(window), WM_NULL, WPARAM(0), LPARAM(0));
         let _ = DestroyMenu(menu);
         chosen
     };
-    choose(window, chosen, login);
+    // Item identifiers are one past the action's index, as 0 means nothing was chosen.
+    if let Some(action) = chosen.checked_sub(1).and_then(|i| actions.into_iter().nth(i)) {
+        choose(window, action);
+    }
 }
 
-fn choose(window: HWND, chosen: u32, login: bool) {
-    match chosen {
-        0 => {}
-        ID_QUIT => quit(window),
-        ID_CLEAR => APP.with_borrow(|app| {
+/// A Win32 popup menu for `items`, with each command's action pushed onto `actions`.
+fn native_menu(items: &[Item], actions: &mut Vec<Action>) -> Option<HMENU> {
+    unsafe {
+        let menu = CreatePopupMenu().ok()?;
+        for item in items {
+            match item {
+                Item::Separator => {
+                    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+                }
+                Item::Submenu { label, items, enabled } => {
+                    let Some(submenu) = native_menu(items, actions) else { continue };
+                    let flags = MF_POPUP | if *enabled { MF_ENABLED } else { MF_GRAYED };
+                    let _ = AppendMenuW(menu, flags, submenu.0 as usize, &HSTRING::from(label.as_str()));
+                }
+                Item::Command { label, action, checked, radio, enabled } => {
+                    actions.push(action.clone());
+                    let id = actions.len() as u32;
+                    let flags =
+                        MF_STRING | if *enabled { MF_ENABLED } else { MF_GRAYED } | if *checked && !radio { MF_CHECKED } else { MF_UNCHECKED };
+                    let _ = AppendMenuW(menu, flags, id as usize, &HSTRING::from(label.as_str()));
+                    if *checked && *radio {
+                        let _ = CheckMenuRadioItem(menu, id, id, id, MF_BYCOMMAND.0);
+                    }
+                }
+            }
+        }
+        Some(menu)
+    }
+}
+
+fn choose(window: HWND, action: Action) {
+    match action {
+        Action::Quit => quit(window),
+        Action::CheckForUpdates => {}
+        Action::ClearSnow => APP.with_borrow(|app| {
             if let Some(app) = app {
-                send(app, Command::ClearSnow(!prefs::animations_enabled()));
+                send(app, Command::ClearSnow(!animations_enabled()));
             }
         }),
-        ID_LOGIN => {
-            let status = prefs::set_opens_at_login(!login);
-            log!("open at login {}: {status:?}", !login);
-        }
-        _ => APP.with_borrow_mut(|app| {
+        Action::Change(change) => APP.with_borrow_mut(|app| {
             let Some(app) = app else { return };
-            let settings = &mut app.settings;
-            let command = match chosen {
-                ID_ACCUMULATE => {
-                    settings.accumulate = !settings.accumulate;
-                    Command::Accumulate(settings.accumulate)
-                }
-                ID_MELT => {
-                    settings.melt = !settings.melt;
-                    Command::Melt(settings.melt)
-                }
-                ID_WINDOWS => {
-                    settings.snow_on_windows = !settings.snow_on_windows;
-                    Command::SnowOnWindows(settings.snow_on_windows)
-                }
-                ID_BEHIND => {
-                    settings.behind_windows = !settings.behind_windows;
-                    Command::BehindWindows(settings.behind_windows)
-                }
-                ID_TASKBAR => {
-                    settings.behind_taskbar = !settings.behind_taskbar;
-                    Command::BehindTaskbar(settings.behind_taskbar)
-                }
-                ID_SCREENSHOTS => {
-                    settings.show_in_screenshots = !settings.show_in_screenshots;
-                    Command::ShowInScreenshots(settings.show_in_screenshots)
-                }
-                _ => {
-                    let Some(&snowfall) = Snowfall::ALL.get(chosen.wrapping_sub(ID_SNOWFALL) as usize) else { return };
-                    settings.snowfall = snowfall;
-                    Command::Snowfall(snowfall)
-                }
-            };
-            settings.save();
-            send(app, command);
+            log!("{change:?}");
+            // The menu shows the setting, so it only changes once the autostart entry did.
+            if let Change::OpenAtLogin(on) = change
+                && !registry::set_open_at_login(on)
+            {
+                return;
+            }
+            app.settings.apply(&change);
+            app.settings.save(&mut Registry);
+            send(app, Command::Settings(app.settings.clone()));
         }),
     }
+}
+
+/// The "Animation effects" setting: off means the person prefers less motion.
+fn animations_enabled() -> bool {
+    let mut enabled = windows::core::BOOL(1);
+    let result = unsafe {
+        SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, Some((&raw mut enabled).cast::<c_void>()), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0))
+    };
+    result.is_err() || enabled.as_bool()
 }
 
 fn quit(window: HWND) {
