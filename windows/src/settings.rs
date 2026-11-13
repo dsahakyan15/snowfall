@@ -6,17 +6,8 @@ use std::collections::BTreeSet;
 #[cfg(test)]
 use std::collections::HashMap;
 
-/// How much snow falls.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Level {
-    Off,
-    Snow,
-    HeavySnow,
-}
-
-impl Level {
-    pub const ALL: [Level; 3] = [Level::Off, Level::Snow, Level::HeavySnow];
-}
+/// How much snow falls: the engine's own levels.
+pub use snowfall_core::simulation::Snowfall as Level;
 
 /// Which way, and how hard, the wind blows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
