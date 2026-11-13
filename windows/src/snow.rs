@@ -22,7 +22,7 @@ use crate::log;
 use crate::power::{self, Power, Strength};
 use crate::render::Gpu;
 use crate::screen::{
-    BACKDROP_CHANGED, Clock, DISPLAYS_CHANGED, FADE_OUT, Monitor, Names, Screen, dip_size, display_names, listen, monitors, walls, watch_taskbar,
+    BACKDROP_CHANGED, Clock, DISPLAYS_CHANGED, Monitor, Names, Screen, dip_size, display_names, listen, monitors, walls, watch_taskbar,
 };
 use crate::settings::Settings;
 use crate::tracker::{self, Tracker};
@@ -102,11 +102,16 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
                             screen.wake(now);
                         });
                     }
+                    // No longer shown over full screen, the overlays go back to the work area at once, paused or not.
+                    let stale = !(settings.show_over_full_screen && !settings.behind_windows) && !layout.full_screen.is_empty();
+                    if stale {
+                        layout.full_screen.clear();
+                    }
                     // Moving behind windows or back rebuilds every overlay; screens turned on or off only add or remove some.
                     if settings.behind_windows != previous.behind_windows {
                         layer = settings.behind_windows.then(find_layer).flatten();
                         screens = sync_screens(&gpu, &settings, &mut layout, screens, layer, true, power);
-                    } else if settings.screens_off != previous.screens_off {
+                    } else if settings.screens_off != previous.screens_off || stale {
                         screens = sync_screens(&gpu, &settings, &mut layout, screens, layer, false, power);
                     }
                     if settings.pause_on_battery != previous.pause_on_battery {
@@ -221,27 +226,28 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
             let windows = &tracker;
             let time = (clock.seconds(now - started) % 1000.0) as f32;
             let mut lost = false;
+            // Shown over full screen, the snow stays, and reaches down to the bottom of the display, where the taskbar was.
+            let over = settings.show_over_full_screen && !settings.behind_windows;
             for screen in screens.iter_mut().filter(|screen| screen.next_due <= now + clock.tolerance()) {
                 let full_screen = tracker.covering(&screen.monitor.bounds);
-                // Shown over full screen, the snow reaches down to the bottom of the display, where the taskbar was.
-                let over = settings.show_over_full_screen && !settings.behind_windows;
-                if (over && full_screen.is_some()) != layout.full_screen.contains(&screen.monitor.name) {
-                    if !layout.full_screen.remove(&screen.monitor.name) {
+                let wanted = over && full_screen.is_some();
+                if wanted != layout.full_screen.contains(&screen.monitor.name) {
+                    if wanted {
                         layout.full_screen.insert(screen.monitor.name.clone());
+                    } else {
+                        layout.full_screen.remove(&screen.monitor.name);
                     }
                     DISPLAYS_CHANGED.set(true);
                 }
                 let covering = full_screen.filter(|_| !over);
                 if covering.is_some() != screen.covered() {
                     log!("{} {}", screen.monitor.name, covering.map_or("uncovered".to_string(), |class| format!("covered by {class}")));
-                    screen.set_covered(&gpu, covering.is_some());
-                    if covering.is_some() {
-                        screen.next_due = now + (clock.frequency as f64 * FADE_OUT) as i64;
-                        continue;
-                    }
+                    screen.next_due = screen.set_covered(&gpu, covering.is_some(), now, &clock);
                 }
                 if screen.covered() {
-                    screen.next_due = screen.finish_fade(now, &clock);
+                    if screen.next_due <= now + clock.tolerance() {
+                        screen.next_due = screen.finish_fade(now, &clock);
+                    }
                     continue;
                 }
                 let began = Clock::now();
@@ -293,22 +299,26 @@ fn sync_screens(
 ) -> Vec<Screen> {
     let mut result = Vec::new();
     layout.names = display_names();
+    // Displays gone since can't be full screen.
+    let present: HashSet<String> = monitors(&layout.names).into_iter().map(|monitor| monitor.name).collect();
+    layout.full_screen.retain(|name| present.contains(name));
     let displays = snowy_monitors(layout, settings);
 
     for monitor in displays.iter().cloned() {
         let kept = current.iter().position(|screen| screen.monitor.name == monitor.name);
-        let simulation = match kept.map(|i| current.swap_remove(i)) {
+        let (simulation, covered) = match kept.map(|i| current.swap_remove(i)) {
             Some(screen) if screen.monitor == monitor && !rebuild && screen.behind_windows() == layer.is_some() => {
                 result.push(screen);
                 continue;
             }
             Some(screen) => {
+                let covered = screen.covered();
                 let mut simulation = screen.simulation;
                 let (width, height) = dip_size(&monitor);
                 simulation.resize(width as f32, height as f32);
-                simulation
+                (simulation, covered)
             }
-            None => new_simulation(&monitor, settings),
+            None => (new_simulation(&monitor, settings), false),
         };
         log!(
             "display {} ({}, {}): {:?}, {} dpi, {} Hz",
@@ -328,7 +338,13 @@ fn sync_screens(
             Screen::new(gpu, monitor, simulation, settings, None)
         });
         match screen {
-            Ok(screen) => result.push(screen),
+            Ok(mut screen) => {
+                // A display a full-screen app covers stays clear of snow through the change.
+                if covered {
+                    screen.cover_now(gpu);
+                }
+                result.push(screen);
+            }
             Err((error, _)) => log!("overlay failed: {error}"),
         }
     }

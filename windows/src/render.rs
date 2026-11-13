@@ -252,6 +252,14 @@ impl Surface {
         }
     }
 
+    /// Sets the whole surface's opacity at once.
+    pub fn set_opacity(&self, gpu: &Gpu, opacity: f32) -> Result<()> {
+        unsafe {
+            self.effect.SetOpacity2(opacity)?;
+            gpu.composition.Commit()
+        }
+    }
+
     /// Fades the whole surface from `from` to `to` opacity over `seconds`. The compositor plays it, so it costs no frames.
     pub fn fade(&self, gpu: &Gpu, from: f32, to: f32, seconds: f64) -> Result<()> {
         unsafe {
