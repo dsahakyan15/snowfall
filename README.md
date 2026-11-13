@@ -17,6 +17,6 @@ cargo test
 
 ## Licence
 
-Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
+Licensed under `MIT OR Apache-2.0`: either the [MIT licence](LICENSE-MIT) or the [Apache License 2.0](LICENSE-APACHE), at your option.
 
 Snowfall started as a fork of [Snowhush](https://github.com/mbezruchko/Snowhush) v0.6.1 (MIT); see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

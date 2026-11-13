@@ -320,7 +320,6 @@ impl Screen {
             return;
         }
         self.windows_seen = tracker.generation;
-        self.simulation.covers = tracker.covers(&self.monitor.rect, self.size);
         let surfaces = tracker.surfaces(&self.monitor.rect, self.size);
         if surfaces == self.surfaces {
             return;
@@ -343,7 +342,6 @@ impl Screen {
 
     pub fn drop_window_snow(&mut self) {
         self.simulation.update_windows(&[], 0.1, &HashSet::new(), &HashSet::new(), false);
-        self.simulation.covers.clear();
         self.surfaces.clear();
         self.windows_seen = 0;
     }

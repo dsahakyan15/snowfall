@@ -7,12 +7,6 @@ use std::ops::Range;
 use crate::geometry::{Rect, V2, smoothstep};
 use crate::layer::SnowLayer;
 
-mod ghosts;
-mod pumpkins;
-
-use ghosts::Haunting;
-use pumpkins::Pumpkins;
-
 pub type WindowId = isize;
 
 pub const COLUMN_WIDTH: f32 = 2.0;
@@ -40,14 +34,6 @@ const BREAK_LIFT: f32 = 10.0;
 /// Snow sticks to a window: it only lets go when pulled away harder than this, on top of its weight.
 const ADHESION: f32 = 3500.0;
 const SHAKING: f32 = 4.0;
-/// Leaves hold together far less than snow: a heap of them flies apart as soon as it lifts off its window at all,
-/// and a shake that would only stir snow throws them off.
-const LEAF_BREAK_LIFT: f32 = 2.0;
-const LEAF_SHAKING: f32 = 0.8;
-/// Leaves hardly stick to a window and slide over it easily: shaken, the window moves out from under them.
-const LEAF_ADHESION: f32 = 500.0;
-const LEAF_GRIP: f32 = 0.8;
-const LEAF_SLIP: f32 = 0.5;
 /// The height of the display, in points, the way snow comes off a moving window was tuned on, on the Mac.
 const TUNED_HEIGHT: f32 = 1440.0;
 /// The pointer speeds up less with a flick of the hand on Windows and under libinput than on the Mac, so a window
@@ -69,18 +55,6 @@ const PACKING: f32 = 0.6;
 const SLIDE_DRAG: f32 = 0.025;
 const SLIDE_WIND_MAX: f32 = 160.0;
 const SLIDE_CALM: f32 = 0.35;
-/// Leaves fall this much sparser than snow, each one being so much bigger.
-const LEAF_SHARE: f32 = 0.07;
-/// The share of a heap one fallen leaf makes up.
-const LEAF_AREA: f32 = 24.0;
-/// Leaves lie loosely, with air between them: the bulk a landing leaf adds to its heap, per point of its length.
-const LEAF_BULK: f32 = 5.5;
-/// How much of a heap's visible bulk each leaf coming off it stands for: a heap is packed with overlapping leaves,
-/// so as many fly off as it looked to hold.
-const LEAF_SHOWN: f32 = 30.0;
-const MAX_LYING: usize = 1500;
-/// The top of a heap is the lying leaves themselves: the pile shader draws the mass under them only this far down.
-const LEAF_COVER: f32 = 2.5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Snowfall {
@@ -140,47 +114,6 @@ pub struct Sprite {
     pub tint: [f32; 3],
     /// Gives a lump of snow its ragged outline and tumble; zero for a round flake.
     pub lump: f32,
-    /// Draws a Halloween ghost instead, when the first is above zero: its seed (one and up), the height of the drift's
-    /// surface it rises out of (in the same points as `position`), how far its eyes are open, and how far it has taken
-    /// shape out of a heap of snow. Packed four to a vector for the graphics card, as are `pose` and `mood`.
-    pub ghost: [f32; 4],
-    /// A ghost's paws: how far up saying boo, how far its right one is held out at the angle that follows (radians,
-    /// zero pointing right, up positive), and how far both are spread for a wave.
-    pub pose: [f32; 4],
-    /// How far a ghost is into a dab, and how cross it is.
-    pub mood: [f32; 2],
-    /// Draws a leaf instead, when the first is above zero: its seed, which picks its shape and colour, which way it
-    /// points (radians), and how much of its face shows, and which side: one is its front face on, below zero its back.
-    pub leaf: [f32; 3],
-    /// How fast a leaf turns and tumbles, a second: it blurs over the exposure, as it moves.
-    pub spin: [f32; 2],
-}
-
-/// A Halloween sign a ghost holds up, or lets fall: the picture of `SIGN_CAPTIONS[caption]`, its stick's foot at
-/// `anchor`, turned `angle` radians counterclockwise about it, nothing of it showing below `ground`.
-#[derive(Clone, Copy, Debug)]
-pub struct SignSprite {
-    pub caption: usize,
-    pub anchor: V2,
-    pub angle: f32,
-    pub ground: f32,
-}
-
-/// A Halloween jack-o'-lantern sitting in the snow at the bottom of the screen: the middle of its bottom at `anchor`,
-/// `width` points wide, its candle's flicker set apart from the other's by `seed`.
-#[derive(Clone, Copy, Debug)]
-pub struct PumpkinSprite {
-    pub anchor: V2,
-    pub width: f32,
-    pub seed: f32,
-}
-
-/// A bit of something that crumbles into snow, such as a window: it keeps its colour for a moment while it falls.
-#[derive(Clone, Copy, Debug)]
-pub struct ScatterPiece {
-    pub position: V2,
-    pub velocity: V2,
-    pub color: [f32; 3],
 }
 
 pub struct PileLayer<'a> {
@@ -223,8 +156,6 @@ struct Flake {
     tint_amount: f32,
     /// The direction of the gust that caught the flake and carries it off the screen; zero until then.
     blown: f32,
-    /// A leaf instead of a snowflake: its seed, which picks its shape and colour; zero for snow.
-    leaf: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -237,35 +168,6 @@ struct Grain {
     lump: f32,
     /// Powder carried off by a gust: it rides the wind off the screen instead of settling.
     blown: bool,
-    /// For a leaf, picks its shape and colour.
-    seed: f32,
-    /// Only the bulk under fallen leaves, with no leaf of its own: unseen, it falls and adds to the heap it lands on.
-    bulk: bool,
-}
-
-/// A fallen leaf lying flat on a heap, on the ground or on a window.
-#[derive(Clone, Copy)]
-struct LyingLeaf {
-    /// The window it lies on, or zero for the ground.
-    layer: WindowId,
-    /// From the layer's base along it, and up from the base to where the leaf rests and to the top of its own bulk.
-    x: f32,
-    rest: f32,
-    top: f32,
-    size: f32,
-    seed: f32,
-    tilt: f32,
-    /// Half a turn when it came down pointing the other way.
-    around: f32,
-    /// How it was turned and tumbled in the air, and how far along the surface it slides, while it settles.
-    from_turn: f32,
-    from_flip: f32,
-    slide: f32,
-    settling: f32,
-    settled: f32,
-    life: f32,
-    age: f32,
-    fade: f32,
 }
 
 /// Powder thrown up by a lump bursting: it billows, slows in the air and fades without settling.
@@ -326,10 +228,6 @@ struct Air {
     overflow: Vec<(f32, f32)>,
     gust: Option<Gust>,
     slide_wind: f32,
-    /// Leaves fall instead of snow and heap up where it would.
-    autumn: bool,
-    /// How many more leaves the heaps can show coming off them, as `spare_leaves` found it, less those shown since.
-    leaf_budget: f32,
     /// How much more a window's jolts up and down count than on the Mac the snow was tuned on: across a smaller
     /// display, or by a gentler pointer, the same jerk of the hand moves it fewer points a second, and its snow should
     /// come off as easily. Side to side the snow slides on the window, which shows any such boost as sliding too far.
@@ -346,11 +244,6 @@ pub struct SnowSimulation {
     pub accumulates: bool,
     /// Side edges, left and right, with no display past them: a window slid past one leaves its snow heaped against the edge.
     pub walls: (bool, bool),
-    /// Keeps the snowfall from starting until a scattered window's snow first reaches the bottom of the screen.
-    snowfall_held: bool,
-    /// Set when the held snowfall starts by itself, so the other displays can start theirs.
-    snowfall_released: bool,
-    scattered_until: f64,
     /// The ground first, then one ledge per window, with `ids` alongside.
     layers: Vec<SnowLayer>,
     ids: Vec<WindowId>,
@@ -362,18 +255,6 @@ pub struct SnowSimulation {
     target_flakes: usize,
     strength_target: f32,
     next_shift: f64,
-    /// Every app window on the screen, maximized and full-screen ones too, left, bottom, right, top in points:
-    /// a pumpkin hides from any that covers it.
-    pub covers: Vec<[f32; 4]>,
-    /// The window that is a panel's shelf along the bottom of the screen, if any: pumpkins over it sit in its snow.
-    pub shelf: Option<WindowId>,
-    haunting: Haunting,
-    lanterns: Pumpkins,
-    lying: Vec<LyingLeaf>,
-    /// The mode waiting for the gust to clear the screen, so one kind never turns into the other in sight.
-    next_autumn: Option<bool>,
-    switched_at: f64,
-    restyled: bool,
     air: Air,
 }
 
@@ -390,9 +271,6 @@ impl SnowSimulation {
             thaws: false,
             accumulates: true,
             walls: (false, false),
-            snowfall_held: false,
-            snowfall_released: false,
-            scattered_until: -10.0,
             layers: vec![ground],
             ids: vec![0],
             dormant: HashMap::new(),
@@ -401,14 +279,6 @@ impl SnowSimulation {
             target_flakes: 0,
             strength_target: 1.0,
             next_shift: 0.0,
-            covers: Vec::new(),
-            shelf: None,
-            haunting: Haunting::new(),
-            lanterns: Pumpkins::default(),
-            lying: Vec::new(),
-            next_autumn: None,
-            switched_at: 0.0,
-            restyled: false,
             air: Air {
                 flakes: Vec::new(),
                 grains: Vec::new(),
@@ -426,8 +296,6 @@ impl SnowSimulation {
                 overflow: Vec::new(),
                 gust: None,
                 slide_wind: 0.0,
-                autumn: false,
-                leaf_budget: 0.0,
                 jolt_scale: jolt_scale(height),
             },
         };
@@ -459,16 +327,6 @@ impl SnowSimulation {
         self.update_target();
     }
 
-    pub fn set_snowfall_held(&mut self, held: bool) {
-        self.snowfall_held = held;
-        self.update_target();
-    }
-
-    /// Whether the held snowfall started by itself since the last call.
-    pub fn take_snowfall_released(&mut self) -> bool {
-        std::mem::take(&mut self.snowfall_released)
-    }
-
     /// Scales the snowfall; flakes come and go through the usual cycle, so a change shows gradually.
     pub fn set_density(&mut self, density: f32) {
         self.density = density;
@@ -476,59 +334,22 @@ impl SnowSimulation {
     }
 
     pub fn has_snow(&self) -> bool {
-        !self.lying.is_empty() || self.layers.iter().any(|layer| layer.top > 0.5)
+        self.layers.iter().any(|layer| layer.top > 0.5)
     }
 
-    pub fn autumn(&self) -> bool {
-        self.air.autumn
-    }
-
-    /// Leaves fall instead of snow, starting at once: what falls now turns into the other kind where it is.
-    pub fn set_autumn(&mut self, autumn: bool) {
-        if autumn == self.air.autumn {
-            return;
-        }
-        self.air.autumn = autumn;
-        self.lying.clear();
-        self.update_target();
-        let width = self.width;
-        let heights: Vec<f32> = self.air.flakes.iter().take(self.target_flakes).map(|flake| flake.position.y).collect();
-        self.air.flakes = heights.into_iter().map(|y| self.air.make_flake(width, y)).collect();
-        self.restyled = true;
-    }
-
-    /// Clears the screen first, with a gust in `direction` (or, `calm`, melting it in place), and lets the other kind
-    /// fall only after, from the top.
-    pub fn switch_mode(&mut self, autumn: bool, direction: f32, calm: bool) {
-        if autumn == self.air.autumn {
-            self.next_autumn = None;
-            return;
-        }
-        if self.next_autumn.is_some() {
-            return;
-        }
-        self.next_autumn = Some(autumn);
-        self.switched_at = self.air.clock;
-        self.blow_away(direction, calm);
-    }
-
-    /// Nothing falls, lies, waits for its window or haunts, and nothing will until the snowfall or Halloween is
-    /// turned on: the screen can rest.
+    /// Nothing falls or waits for its window, and nothing will until snowfall is turned on: the screen can rest.
     pub fn is_empty(&self) -> bool {
         self.snowfall == Snowfall::Off
-            && !self.haunting.on
             && self.sprite_count() == 0
-            && !self.haunting.moving()
             && self.air.gust.is_none()
             && self.air.overflow.is_empty()
             && self.dormant.is_empty()
             && self.parking.is_empty()
-            && self.next_autumn.is_none()
             && self.layers.iter().all(|layer| layer.top <= 0.0)
     }
 
     pub fn sprite_count(&self) -> usize {
-        self.lying.len() + self.air.flakes.len() + self.air.grains.len() + self.air.motes.len() + self.haunting.sprite_count()
+        self.air.flakes.len() + self.air.grains.len() + self.air.motes.len()
     }
 
     /// Floats the renderer needs per frame: each layer's surface and bed.
@@ -556,7 +377,6 @@ impl SnowSimulation {
         self.vary(dt);
         let wind = self.air.slide_wind;
         self.air.slide_wind = if wind.abs() < 1.0 { 0.0 } else { wind * (-dt / SLIDE_CALM).exp() };
-        self.air.leaf_budget = self.spare_leaves();
         self.expire_parking();
         for ledge in &mut self.layers[1..] {
             self.air.carry(ledge, dt);
@@ -570,20 +390,10 @@ impl SnowSimulation {
         self.advance_flakes(dt);
         self.advance_grains(dt);
         self.air.advance_motes(dt);
-        self.haunt(dt);
         self.settle(dt);
-        self.tend_leaves(dt);
-        if let Some(next) = self.next_autumn
-            && self.air.gust.is_none()
-            && (self.air.grains.is_empty() || self.air.clock - self.switched_at > 6.0)
-        {
-            self.next_autumn = None;
-            self.set_autumn(next);
-        }
+
         self.spawn_flakes();
-        if self.haunting.on {
-            self.settle_pumpkins(dt);
-        }
+
         for (area, x) in self.air.overflow.drain(..) {
             self.layers[0].deposit(area, x, true);
         }
@@ -594,12 +404,9 @@ impl SnowSimulation {
         }
         let air = &self.air;
         // Only a cursor that actually displaces snow needs the full rate; one passing near it or resting in it changes nothing.
-        let pushed = air.clock - air.last_window_motion < 0.6
-            || air.clock - air.last_cursor_push < 0.3
-            || air.gust.is_some()
-            || self.haunting.pushing(air.clock);
+        let pushed = air.clock - air.last_window_motion < 0.6 || air.clock - air.last_cursor_push < 0.3 || air.gust.is_some();
         // The steady trickle off window corners is a few tiny grains at a time; they read fine at the calm rate.
-        let flying = air.grains.len() > 24 || air.clock < self.scattered_until || air.slide_wind.abs() > 20.0;
+        let flying = air.grains.len() > 24 || air.slide_wind.abs() > 20.0;
         self.pace = if pushed {
             Pace::Interactive
         } else if flying {
@@ -607,105 +414,49 @@ impl SnowSimulation {
         } else {
             Pace::Calm
         };
-        let changed = was_moving
-            || self.sprite_count() > 0
-            || self.haunting.moving()
-            || self.air.heights_changed
-            || self.air.windows_changed
-            || self.lanterns.moved
-            || self.restyled;
-        self.restyled = false;
+        let changed = was_moving || self.sprite_count() > 0 || self.air.heights_changed || self.air.windows_changed;
         self.air.windows_changed = false;
-        self.lanterns.moved = false;
         changed
     }
 
     pub fn write_sprites(&self, buffer: &mut [Sprite]) -> usize {
-        let clock = self.air.clock;
-        let shown: HashMap<WindowId, usize> = self.ids.iter().enumerate().map(|(li, &id)| (id, li)).collect();
-        let lying = self.lying.iter().filter_map(|leaf| {
-            let layer = &self.layers[*shown.get(&leaf.layer)?];
-            let ease = 1.0 - (1.0 - leaf.settled).powi(3);
-            let x = layer.heap_x() + leaf.x - leaf.slide * (1.0 - ease);
-            let i = layer.index(x).filter(|&i| layer.visible[i])?;
-            let target = resting_turn(leaf, layer, i);
-            // Sliding over to where it comes to rest, it skims the ground until it rides up onto the leaves there.
-            let rest = if leaf.settled < 1.0 { (layer.surface(i) - layer.base().y).min(leaf.rest) } else { leaf.rest };
-            let flat = if leaf.from_flip < 0.0 { -0.7 } else { 0.7 };
-            // The heap's mass shows `LEAF_COVER` below its surface: the leaf lies on what shows, or on the bare window.
-            let sink = (rest - layer.bed[i]).clamp(0.0, LEAF_COVER);
-            Some(Sprite {
-                position: V2::new(x, layer.base().y + rest + leaf.size * 0.2 - sink),
-                size: leaf.size,
-                alpha: leaf.fade,
-                leaf: [leaf.seed, leaf.from_turn + (target - leaf.from_turn) * ease, leaf.from_flip + (flat - leaf.from_flip) * ease],
-                ..Sprite::default()
-            })
+        let flakes = self.air.flakes.iter().map(|flake| Sprite {
+            position: flake.position,
+            velocity: flake.velocity,
+            size: flake.size,
+            alpha: flake.alpha,
+            soft: flake.soft,
+            tint_amount: flake.tint_amount,
+            tint: flake.tint,
+            ..Sprite::default()
         });
-        let flakes = self.air.flakes.iter().map(|flake| {
-            if flake.leaf > 0.0 {
-                return Sprite {
-                    position: flake.position,
-                    velocity: motion(flake),
-                    size: flake.size,
-                    alpha: flake.alpha,
-                    leaf: [flake.leaf, flake_turn(clock, flake), tumble(clock, flake.leaf)],
-                    spin: [flake.phase.cos() * 0.6 * flake.sway_rate + flake.leaf - 0.5, tumble_speed(clock, flake.leaf)],
-                    ..Sprite::default()
-                };
-            }
-            Sprite {
-                position: flake.position,
-                velocity: flake.velocity,
-                size: flake.size,
-                alpha: flake.alpha,
-                soft: flake.soft,
-                tint_amount: flake.tint_amount,
-                tint: flake.tint,
-                ..Sprite::default()
-            }
+        let grains = self.air.grains.iter().map(|grain| Sprite {
+            position: grain.position,
+            velocity: grain.velocity,
+            size: grain.size,
+            alpha: if grain.lump > 0.0 {
+                0.97
+            } else if grain.blown {
+                0.8
+            } else {
+                0.95
+            },
+            soft: if grain.lump > 0.0 { 0.2 } else { 0.3 },
+            tint: [1.0; 3],
+            lump: grain.lump,
+            ..Sprite::default()
         });
-        let autumn = self.air.autumn;
-        let grains = self.air.grains.iter().filter(|grain| !grain.bulk).map(|grain| {
-            if autumn {
-                return Sprite {
-                    position: grain.position,
-                    velocity: grain.velocity,
-                    size: if grain.size >= 5.5 { grain.size } else { 6.0 + grain.seed * 4.5 },
-                    alpha: 0.95,
-                    leaf: [grain.seed, grain_turn(clock, grain), tumble(clock, grain.seed)],
-                    spin: [(grain.seed - 0.5) * 9.0, tumble_speed(clock, grain.seed)],
-                    ..Sprite::default()
-                };
-            }
-            Sprite {
-                position: grain.position,
-                velocity: grain.velocity,
-                size: grain.size,
-                alpha: if grain.lump > 0.0 {
-                    0.97
-                } else if grain.blown {
-                    0.8
-                } else {
-                    0.95
-                },
-                soft: if grain.lump > 0.0 { 0.2 } else { 0.3 },
-                tint: [1.0; 3],
-                lump: grain.lump,
-                ..Sprite::default()
-            }
-        });
-        let motes = self.air.motes.iter().filter(|_| !autumn).map(|mote| {
+        let motes = self.air.motes.iter().map(|mote| {
             let t = mote.age / mote.life;
             let fade = (mote.age / 0.06).min(1.0) * (1.0 - t).powf(1.5);
             Sprite { position: mote.position, size: mote.size * (1.0 + t), alpha: mote.alpha * fade, soft: 1.0, tint: [1.0; 3], ..Sprite::default() }
         });
         let mut count = 0;
-        for (slot, sprite) in buffer.iter_mut().zip(lying.chain(flakes).chain(grains).chain(motes)) {
+        for (slot, sprite) in buffer.iter_mut().zip(flakes.chain(grains).chain(motes)) {
             *slot = sprite;
             count += 1;
         }
-        count + self.write_haunting(&mut buffer[count..])
+        count
     }
 
     pub fn write_layers(&self, buffer: &mut [f32]) -> Vec<PileLayer<'_>> {
@@ -738,33 +489,6 @@ impl SnowSimulation {
         result
     }
 
-    /// Turns the pieces into snowflakes that drift down and fade to white; together they leave a small drift.
-    pub fn scatter(&mut self, pieces: &[ScatterPiece]) {
-        self.scattered_until = self.air.clock + 8.0;
-        for piece in pieces {
-            let random = &mut self.air.random;
-            let depth = random.next().powf(0.7);
-            self.air.flakes.push(Flake {
-                position: piece.position,
-                velocity: piece.velocity,
-                fall_speed: 70.0 + depth * 170.0 + random.range(0.0, 40.0),
-                size: 1.8 + depth * 2.6,
-                depth,
-                alpha: 0.5 + depth * 0.45,
-                soft: 0.7 - depth * 0.4,
-                phase: random.range(0.0, PHASE_WRAP),
-                sway_rate: random.range(0.6, 1.8),
-                sway_amount: random.range(8.0, 24.0),
-                settles: true,
-                mass: 0.06,
-                tint: piece.color,
-                tint_amount: 1.0,
-                blown: 0.0,
-                leaf: 0.0,
-            });
-        }
-    }
-
     // Windows
 
     /// A desktop slid past at `velocity` pixels a second, negative to the left: the air it drags along blows the
@@ -791,7 +515,6 @@ impl SnowSimulation {
         elsewhere: &HashSet<WindowId>,
         sliding: bool,
     ) {
-        self.air.leaf_budget = self.spare_leaves();
         for li in self.air.held_layers.drain(..) {
             if let Some(layer) = self.layers.get_mut(li) {
                 layer.release_support();
@@ -815,11 +538,7 @@ impl SnowSimulation {
                 if sliding && columns == ledge.count() {
                     self.air.pan(ledge, left, top);
                 } else {
-                    let before = V2::new(ledge.heap_x(), ledge.base().y);
-                    if self.air.move_ledge(ledge, left, right, top, columns, interval) {
-                        // The leaves lying on it are left behind with the rest of its heap.
-                        self.drop_leaves(surface.id, before);
-                    }
+                    self.air.move_ledge(ledge, left, right, top, columns, interval);
                 }
                 li
             } else {
@@ -856,8 +575,7 @@ impl SnowSimulation {
                 self.dormant.insert(id, ledge);
             } else if !parked.contains(&id) {
                 let velocity = ledge.track_velocity + ledge.offset_velocity;
-                self.drop_leaves(id, V2::new(ledge.heap_x(), ledge.base().y));
-                self.air.shed(&mut ledge, 1.0, velocity, false);
+                self.air.shed(&mut ledge, 1.0, velocity);
             } else if self.air.clock - self.space_changed_at < 0.6 {
                 self.dormant.insert(id, ledge);
             } else {
@@ -881,9 +599,8 @@ impl SnowSimulation {
         while let Some(first) = self.parking.first()
             && self.air.clock - first.2 > 0.25
         {
-            let (id, mut ledge, _) = self.parking.remove(0);
-            self.drop_leaves(id, V2::new(ledge.heap_x(), ledge.base().y));
-            self.air.shed(&mut ledge, 1.0, V2::ZERO, false);
+            let (_, mut ledge, _) = self.parking.remove(0);
+            self.air.shed(&mut ledge, 1.0, V2::ZERO);
         }
     }
 
@@ -988,20 +705,10 @@ impl SnowSimulation {
 
             if flake.settles && self.accumulates && flake.blown == 0.0 {
                 if let Some((li, column)) = landing(&self.layers, flake.position.x, previous_y, flake.position.y) {
-                    if self.snowfall_held && flake.mass < 1.0 && li == 0 {
-                        self.snowfall_held = false;
-                        self.snowfall_released = true;
-                        self.update_target();
-                    }
-                    if flake.leaf > 0.0 {
-                        let (turn, flip) = (flake_turn(self.air.clock, &flake), tumble(self.air.clock, flake.leaf));
-                        let bulk = if self.layers[li].fill(column) > 0.0 { flake.size * LEAF_BULK } else { 0.0 };
-                        self.lay(flake.size, flake.leaf, bulk, flake.position.x, li, turn, flip, flake.velocity.x);
-                    } else {
-                        let layer = &mut self.layers[li];
-                        let amount = flake.size * flake.size * DEPOSITION * flake.mass * layer.fill(column);
-                        layer.deposit(amount, flake.position.x, true);
-                    }
+                    let layer = &mut self.layers[li];
+                    let amount = flake.size * flake.size * DEPOSITION * flake.mass * layer.fill(column);
+                    layer.deposit(amount, flake.position.x, true);
+
                     self.air.heights_changed = true;
                     self.recycle(i);
                     continue;
@@ -1020,10 +727,6 @@ impl SnowSimulation {
             return;
         }
         let damping = (-GRAIN_DRAG * dt).exp();
-        let air_drag = (-3.2 * dt).exp();
-        let wind = self.air.breeze() + self.air.slide_wind;
-        let time = (self.air.clock % 1000.0) as f32;
-        let wake = self.air.cursor_wake();
         let mut i = self.air.grains.len();
         while i > 0 {
             i -= 1;
@@ -1034,20 +737,6 @@ impl SnowSimulation {
                 let speed = if grain.velocity.x < 0.0 { -GUST_WIND * 1.6 } else { GUST_WIND * 1.6 };
                 grain.velocity.x += (speed - grain.velocity.x) * (dt * 2.0).min(1.0);
                 grain.velocity.y -= GRAVITY * 0.08 * dt;
-            } else if self.air.autumn {
-                // A leaf catches the air: flung up, it soon loses its speed and flutters down, swinging from side to side.
-                let phase = time * (1.2 + grain.seed) + grain.seed * 40.0;
-                let fall = (35.0 + 30.0 * grain.seed) * (0.3 + 1.1 * phase.cos().abs());
-                grain.velocity.x = (grain.velocity.x - wind) * air_drag + wind;
-                grain.velocity.y = (grain.velocity.y + fall) * air_drag - fall;
-                // Leaves falling off a window or swept out of a heap ride the cursor's wake as the falling ones do.
-                if let Some(wake) = wake
-                    && !grain.bulk
-                {
-                    stir(&mut grain.velocity, grain.position, wake, dt);
-                }
-                // As wide as a falling leaf's swing: tossed up, it glides off to one side and back as it comes down.
-                grain.position.x += phase.cos() * 60.0 * dt;
             } else {
                 grain.velocity.y -= GRAVITY * dt;
                 grain.velocity *= damping;
@@ -1058,29 +747,8 @@ impl SnowSimulation {
                 self.air.grains.swap_remove(i);
             } else if !grain.blown
                 && grain.velocity.y <= 0.0
-                && let Some((li, column)) = landing(&self.layers, grain.position.x, previous_y, grain.position.y)
+                && let Some((li, _)) = landing(&self.layers, grain.position.x, previous_y, grain.position.y)
             {
-                let layer = &self.layers[li];
-                if self.air.autumn && !grain.bulk && grain.lump <= 0.0 && layer.agitation > LEAF_SHAKING {
-                    // A shaken window lets no leaf settle: it hops off again the way the window goes, and so works its
-                    // way off the edges.
-                    let random = &mut self.air.random;
-                    grain.position.y = layer.surface(column) + 1.0;
-                    let window = layer.track_velocity;
-                    grain.velocity = V2::new(
-                        window.x * random.range(0.6, 1.0) + random.range(-120.0, 120.0),
-                        random.range(80.0, 180.0) + window.y.max(0.0) * random.range(0.6, 1.0),
-                    );
-                    self.air.grains[i] = grain;
-                    continue;
-                }
-                if self.air.autumn && !grain.bulk && grain.lump <= 0.0 {
-                    let size = if grain.size >= 5.5 { grain.size } else { 6.0 + grain.seed * 4.5 };
-                    let (turn, flip) = (grain_turn(self.air.clock, &grain), tumble(self.air.clock, grain.seed));
-                    self.lay(size, grain.seed, grain.area, grain.position.x, li, turn, flip, grain.velocity.x);
-                    self.air.grains.swap_remove(i);
-                    continue;
-                }
                 let layer = &mut self.layers[li];
                 if grain.lump > 0.0 {
                     self.air.burst(&grain, layer);
@@ -1117,19 +785,13 @@ impl SnowSimulation {
         }
     }
 
-    /// No new snow falls while a gust clears the screen or the mode waits to switch.
+    /// No new snow falls while a gust clears the screen.
     fn holding(&self) -> bool {
-        self.next_autumn.is_some() || self.air.blowing()
+        self.air.blowing()
     }
 
     /// Wanders between light lulls, steady snow and heavy flurries.
     fn vary(&mut self, dt: f32) {
-        // In case none of the scattered snow makes it to the bottom, say because it all came to rest on windows.
-        if self.snowfall_held && self.scattered_until > 0.0 && self.air.clock > self.scattered_until {
-            self.snowfall_held = false;
-            self.snowfall_released = true;
-            self.update_target();
-        }
         if self.snowfall != Snowfall::Variable {
             self.strength_target = 1.0;
         } else if self.air.clock >= self.next_shift {
@@ -1183,7 +845,6 @@ impl SnowSimulation {
         let front = gust_front(self.width, age, gust.direction, margin);
         // Whatever the front has long passed is gone by now, however deep it was.
         let finish = age > GUST_SWEEP + if gust.calm { 0.6 } else { 0.8 };
-        self.sweep_haunting(front, gust.direction, gust.calm, finish);
         if !gust.calm {
             let trailing = gust_front(self.width, age - GUST_LAG, gust.direction, margin);
             for flake in self.air.flakes.iter_mut().filter(|flake| flake.blown == 0.0) {
@@ -1194,7 +855,6 @@ impl SnowSimulation {
                 }
             }
             // Whatever else is in the air, like the snow off a window just closed, goes along with the snowfall.
-            let autumn = self.air.autumn;
             let random = &mut self.air.random;
             for grain in self.air.grains.iter_mut().filter(|grain| !grain.blown) {
                 if !(finish || (trailing - grain.position.x) * gust.direction > 0.0) {
@@ -1202,30 +862,7 @@ impl SnowSimulation {
                 }
                 grain.blown = true;
                 grain.area = 0.0;
-                grain.velocity = if autumn {
-                    V2::new(gust.direction * random.range(500.0, 1100.0), random.range(60.0, 260.0))
-                } else {
-                    V2::new(gust.direction * random.range(800.0, 1600.0), random.range(60.0, 300.0))
-                };
-            }
-        }
-        let shown: HashMap<WindowId, usize> = self.ids.iter().enumerate().map(|(li, &id)| (id, li)).collect();
-        for k in (0..self.lying.len()).rev() {
-            let leaf = self.lying[k];
-            let Some(&li) = shown.get(&leaf.layer) else {
-                self.lying.remove(k);
-                continue;
-            };
-            let x = self.layers[li].heap_x() + leaf.x;
-            if !(finish || gust.calm || (front - x) * gust.direction > 0.0) {
-                continue;
-            }
-            if gust.calm {
-                self.lying.remove(k);
-            } else {
-                let random = &mut self.air.random;
-                let velocity = V2::new(gust.direction * random.range(500.0, 1100.0), random.range(60.0, 260.0));
-                self.fly(k, li, velocity, true);
+                grain.velocity = V2::new(gust.direction * random.range(800.0, 1600.0), random.range(60.0, 300.0));
             }
         }
         for layer in &mut self.layers {
@@ -1263,26 +900,7 @@ impl SnowSimulation {
         if share <= 0.1 {
             return;
         }
-        if self.air.autumn {
-            // It lifts some of the leaves lying on top, never the mass under them.
-            let shown: HashMap<WindowId, usize> = self.ids.iter().enumerate().map(|(li, &id)| (id, li)).collect();
-            for k in (0..self.lying.len()).rev() {
-                if self.air.random.next() >= share * dt {
-                    continue;
-                }
-                let leaf = self.lying[k];
-                let Some(&li) = shown.get(&leaf.layer) else { continue };
-                let layer = &self.layers[li];
-                let Some(i) = layer.index(layer.heap_x() + leaf.x) else { continue };
-                if !layer.visible[i] || layer.surface(i) - layer.base().y >= leaf.top + 2.0 {
-                    continue;
-                }
-                let random = &mut self.air.random;
-                let velocity = V2::new(self.air.slide_wind * random.range(1.5, 3.0), random.range(30.0, 120.0));
-                self.fly(k, li, velocity, false);
-            }
-            return;
-        }
+
         for layer in &mut self.layers {
             let count = layer.count();
             let mut dust = 0.0;
@@ -1307,9 +925,8 @@ impl SnowSimulation {
     // Piles
 
     fn settle(&mut self, dt: f32) {
-        // Melting nearly keeps pace with the snowfall, so heavier snowfall builds drifts only a little higher, and the
-        // far sparser leaves wither as slowly.
-        let falling = self.snowfall.flakes_per_megapoint() * self.air.strength * self.density * if self.air.autumn { LEAF_SHARE } else { 1.0 };
+        // Melting nearly keeps pace with the snowfall, so heavier snowfall builds drifts only a little higher.
+        let falling = self.snowfall.flakes_per_megapoint() * self.air.strength * self.density;
         let melt_pace = if falling > 0.0 { (falling / THAW_BALANCE).powf(THAW_EXPONENT) } else { 1.0 };
         let outside: Vec<[f32; 2]> = (0..self.layers.len())
             .map(|li| if li == 0 { [0.0; 2] } else { [outside(&self.layers, li, true), outside(&self.layers, li, false)] })
@@ -1319,8 +936,7 @@ impl SnowSimulation {
         }
         for (li, layer) in self.layers.iter_mut().enumerate() {
             if !self.accumulates || self.thaws {
-                // Withered leaves leave nothing behind.
-                let floor = if !self.accumulates || self.air.autumn {
+                let floor = if !self.accumulates {
                     0.0
                 } else if li == 0 {
                     THAW_DEPTH
@@ -1332,8 +948,7 @@ impl SnowSimulation {
                 }
             }
             // Shaken harder than gravity, a granular pile fluidizes and slumps to a flatter slope.
-            // Leaves catch on one another and heap up steeper than snow.
-            let steepest = if self.air.autumn { REPOSE * 1.8 } else { REPOSE };
+            let steepest = REPOSE;
             let repose = if layer.agitation > SHAKING { steepest * 0.35 } else { steepest };
             if layer.relax(repose, ROUNDING) {
                 self.air.heights_changed = true;
@@ -1352,212 +967,8 @@ impl SnowSimulation {
     }
 
     fn update_target(&mut self) {
-        let per_megapoint = if self.snowfall_held { 0.0 } else { self.snowfall.flakes_per_megapoint() };
-        let share = if self.air.autumn { LEAF_SHARE } else { 1.0 };
-        self.target_flakes = (per_megapoint * share * self.air.strength * self.density * self.width * self.height / 1_000_000.0) as usize;
-    }
-
-    // Leaves
-
-    /// A leaf comes down, slides a little the way it was going and settles flat on whatever lies there, adding its
-    /// bulk to the heap under it so the next one lands on top.
-    #[allow(clippy::too_many_arguments)]
-    fn lay(&mut self, size: f32, seed: f32, area: f32, x: f32, li: usize, turn: f32, flip: f32, drift: f32) {
-        let slide = (drift * 0.06).clamp(-8.0, 8.0);
-        let spot = x + slide;
-        let layer = &mut self.layers[li];
-        let i = layer.clamped_index(spot);
-        let rest = layer.surface(i) - layer.base().y;
-        let steps = ((size / 5.0) as usize).max(1);
-        if area > 0.0 {
-            for step in 0..steps {
-                let along = (step as f32 + 0.5) / steps as f32 - 0.5;
-                let missed = layer.deposit(area / steps as f32, spot + along * size * 0.8, true);
-                self.air.drop_past(layer, missed, spot, 0.0);
-            }
-        }
-        let random = &mut self.air.random;
-        let tilt = random.range(-0.2, 0.2);
-        let left = i.saturating_sub(2);
-        let right = (i + 2).min(layer.count() - 1);
-        let slope = (layer.surface(right) - layer.surface(left)) / ((right - left).max(1) as f32 * layer.column_width);
-        let flat = slope.atan() + tilt;
-        let around = if wrapped(flat - turn).abs() <= PI / 2.0 { 0.0 } else { PI };
-        let target = flat + around;
-        let leaf = LyingLeaf {
-            layer: self.ids[li],
-            x: spot - layer.heap_x(),
-            rest,
-            top: layer.surface(i) - layer.base().y,
-            size,
-            seed,
-            tilt,
-            around,
-            from_turn: target - wrapped(target - turn),
-            from_flip: flip,
-            slide,
-            settling: 0.45 + slide.abs() / 90.0,
-            settled: 0.0,
-            life: random.range(90.0, 180.0),
-            age: 0.0,
-            fade: 1.0,
-        };
-        self.lying.push(leaf);
-        if self.lying.len() > MAX_LYING {
-            self.lying.remove(0);
-        }
-        self.air.heights_changed = true;
-    }
-
-    /// How many more leaves the heaps can show coming off them: as many as all the bulk lying about is worth, less
-    /// the leaves already shown, lying or in the air. Leaves flown off a heap leave their bulk in it, so without
-    /// this a heap thrown about again and again would show more and more of them.
-    fn spare_leaves(&self) -> f32 {
-        if !self.air.autumn {
-            return 0.0;
-        }
-        let mut bulk: f32 = self.air.grains.iter().map(|grain| grain.area).sum();
-        for layer in &self.layers {
-            bulk += layer.heights.iter().map(|h| h.max(0.0)).sum::<f32>() * layer.column_width;
-        }
-        let shown = self.lying.len() + self.air.grains.iter().filter(|grain| !grain.bulk).count();
-        bulk / LEAF_SHOWN - shown as f32
-    }
-
-    /// Sends a lying leaf off its heap into the air.
-    fn fly(&mut self, k: usize, li: usize, velocity: V2, blown: bool) {
-        let layer = &self.layers[li];
-        let from = V2::new(layer.heap_x(), layer.base().y);
-        self.fly_from(k, from, velocity, blown);
-    }
-
-    /// The leaves lying on a window that closed fall from where it was.
-    /// `from` is where the heap's own positions start, and its base's height.
-    fn drop_leaves(&mut self, id: WindowId, from: V2) {
-        for k in (0..self.lying.len()).rev() {
-            if self.lying[k].layer == id {
-                self.fly_from(k, from, V2::ZERO, false);
-            }
-        }
-    }
-
-    fn fly_from(&mut self, k: usize, from: V2, velocity: V2, blown: bool) {
-        let leaf = self.lying.remove(k);
-        self.air.heights_changed = true;
-        if self.air.grains.len() >= MAX_GRAINS {
-            return;
-        }
-        self.air.grains.push(Grain {
-            position: V2::new(from.x + leaf.x, from.y + leaf.rest + 1.0),
-            velocity,
-            area: 0.0,
-            size: leaf.size,
-            lump: 0.0,
-            blown,
-            seed: leaf.seed,
-            bulk: false,
-        });
-    }
-
-    /// Lying leaves fly up when the cursor kicks them or the heap under them comes off, sink with it as it settles,
-    /// sink out of sight deep under the leaves that land on them, and wither away while the snow melts.
-    fn tend_leaves(&mut self, dt: f32) {
-        for layer in &mut self.layers {
-            layer.lying_leaves = 0.0;
-        }
-        if self.lying.is_empty() {
-            return;
-        }
-        let shown: HashMap<WindowId, usize> = self.ids.iter().enumerate().map(|(li, &id)| (id, li)).collect();
-        for leaf in &self.lying {
-            if let Some(&li) = shown.get(&leaf.layer) {
-                self.layers[li].lying_leaves += 1.0;
-            }
-        }
-        let speed = self.air.cursor_velocity.length();
-        let mut k = self.lying.len();
-        while k > 0 {
-            k -= 1;
-            let mut leaf = self.lying[k];
-            let Some(&li) = shown.get(&leaf.layer) else {
-                let kept = self.dormant.contains_key(&leaf.layer) || self.parking.iter().any(|entry| entry.0 == leaf.layer);
-                if !kept {
-                    self.lying.remove(k);
-                }
-                continue;
-            };
-            let layer = &self.layers[li];
-            let x = layer.heap_x() + leaf.x;
-            let Some(i) = layer.index(x) else {
-                let velocity = V2::new(layer.track_velocity.x, 0.0);
-                self.fly(k, li, velocity, false);
-                continue;
-            };
-            let surface = layer.surface(i) - layer.base().y;
-            let point = V2::new(x, layer.base().y + leaf.rest);
-            if let Some(cursor) = self.air.cursor
-                && speed > 8.0
-                && (point - cursor).length() < CURSOR_RADIUS + leaf.size * 0.4
-            {
-                let velocity = self.air.swept(self.air.cursor_velocity);
-                self.fly(k, li, velocity, false);
-                self.air.last_cursor_push = self.air.clock;
-                continue;
-            }
-            // The heap came off its window: every leaf on it goes along, down to the ones lying on the window itself.
-            if let Some(thrown) = layer.thrown {
-                let random = &mut self.air.random;
-                let velocity = thrown + V2::new(random.range(-40.0, 40.0), random.range(10.0, 60.0));
-                self.fly(k, li, velocity, false);
-                continue;
-            }
-            // Shaken, the leaves on top go as often as the columns of the heap under them do.
-            if self.air.random.next() < leaf_shake_rate(layer.agitation) * 2.0 * dt {
-                let random = &mut self.air.random;
-                let velocity = layer.track_velocity + layer.offset_velocity + V2::new(random.range(-80.0, 80.0), random.range(20.0, 80.0));
-                self.fly(k, li, velocity, false);
-                continue;
-            }
-            if surface < leaf.rest - 3.0 {
-                // It goes the way the heap under it went, not the window.
-                let carried = layer.track_velocity + layer.offset_velocity;
-                let random = &mut self.air.random;
-                let tossed = if layer.agitation > LEAF_SHAKING {
-                    V2::new(random.range(-40.0, 40.0), random.range(20.0, 80.0))
-                } else {
-                    V2::new(random.range(-15.0, 15.0), 0.0)
-                };
-                self.fly(k, li, carried + tossed, false);
-                continue;
-            }
-            // Deep in a heap a leaf is hidden by the ones above it and the mass drawn under them.
-            let buried = surface > leaf.top + 10.0;
-            if surface < leaf.top {
-                let sink = (leaf.top - surface).min(20.0 * dt);
-                leaf.top -= sink;
-                leaf.rest -= sink;
-                self.air.heights_changed = true;
-            }
-            if leaf.settled < 1.0 {
-                leaf.settled = (leaf.settled + dt / leaf.settling).min(1.0);
-                self.air.heights_changed = true;
-            }
-            if buried {
-                leaf.fade -= dt * 2.0;
-                self.air.heights_changed = true;
-            } else if self.thaws {
-                leaf.age += dt;
-                if leaf.age > leaf.life {
-                    leaf.fade -= dt / 4.0;
-                    self.air.heights_changed = true;
-                }
-            }
-            if leaf.fade <= 0.0 {
-                self.lying.remove(k);
-            } else {
-                self.lying[k] = leaf;
-            }
-        }
+        let per_megapoint = self.snowfall.flakes_per_megapoint();
+        self.target_flakes = (per_megapoint * self.air.strength * self.density * self.width * self.height / 1_000_000.0) as usize;
     }
 }
 
@@ -1603,7 +1014,7 @@ impl Air {
         let jumped = displacement.length() / elapsed > JUMP_SPEED;
         if jumped {
             // The window vanished from under the snow and reappeared elsewhere: nothing carried the snow along.
-            self.shed(ledge, 1.0, V2::ZERO, true);
+            self.shed(ledge, 1.0, V2::ZERO);
             ledge.offset = V2::ZERO;
             ledge.offset_velocity = V2::ZERO;
             ledge.track_velocity = V2::ZERO;
@@ -1626,8 +1037,7 @@ impl Air {
                     fresh[j as usize] += h;
                 } else {
                     let position = V2::new(ledge.center_x(i), ledge.floor(i));
-                    let leaves = (h - LEAF_COVER).max(0.0) / h;
-                    self.release_leaves(h * COLUMN_WIDTH, leaves, position, ledge.track_velocity, V2::new(COLUMN_WIDTH / 2.0, h), 0.0);
+                    self.release(h * COLUMN_WIDTH, position, ledge.track_velocity, V2::new(COLUMN_WIDTH / 2.0, h), 0.0);
                 }
             }
             ledge.replace(fresh);
@@ -1649,7 +1059,6 @@ impl Air {
     /// window's acceleration, sticks by friction, slides when that's exceeded, and flies free when the
     /// window drops away faster than gravity or stops short after rising.
     fn carry(&mut self, ledge: &mut SnowLayer, dt: f32) {
-        ledge.thrown = None;
         let previous_velocity = ledge.track_velocity;
         smooth_damp(&mut ledge.track, &mut ledge.track_velocity, ledge.origin, TRACK_TIME, dt);
         let mut acceleration = (ledge.track_velocity - previous_velocity) / dt;
@@ -1677,7 +1086,7 @@ impl Air {
 
         let mut lift = ledge.offset.y;
         let mut lift_velocity = ledge.offset_velocity.y;
-        let (stick, hold, rub) = if self.autumn { (LEAF_ADHESION, LEAF_GRIP, LEAF_SLIP) } else { (ADHESION, GRIP, SLIP) };
+        let (stick, hold, rub) = (ADHESION, GRIP, SLIP);
         let fall = -GRAVITY - acceleration.y;
         if lift > 0.0 || fall > stick {
             lift_velocity += fall * dt;
@@ -1712,8 +1121,7 @@ impl Air {
             ledge.drift += direction as f32 * COLUMN_WIDTH;
             if height > 0.01 {
                 let x = x + direction as f32 * COLUMN_WIDTH;
-                let leaves = (height - LEAF_COVER).max(0.0) / height;
-                self.release_leaves(height * COLUMN_WIDTH, leaves, V2::new(x, y), carried, V2::new(COLUMN_WIDTH / 2.0, height), 0.0);
+                self.release(height * COLUMN_WIDTH, V2::new(x, y), carried, V2::new(COLUMN_WIDTH / 2.0, height), 0.0);
             }
         }
 
@@ -1724,15 +1132,14 @@ impl Air {
             self.heights_changed = true;
         }
 
-        let shakes = if self.autumn { LEAF_SHAKING } else { SHAKING };
-        if lift > if self.autumn { LEAF_BREAK_LIFT } else { BREAK_LIFT } {
-            self.shed(ledge, 1.0, carried, true);
+        let shakes = SHAKING;
+        if lift > BREAK_LIFT {
+            self.shed(ledge, 1.0, carried);
             ledge.offset = V2::ZERO;
             ledge.offset_velocity = V2::ZERO;
-            ledge.thrown = Some(carried);
         } else if ledge.agitation > shakes {
             // A granular bed shaken well past gravity throws grains off its surface.
-            let rate = if self.autumn { leaf_shake_rate(ledge.agitation) } else { (0.06 * (ledge.agitation - shakes)).min(0.8) };
+            let rate = (0.06 * (ledge.agitation - shakes)).min(0.8);
             let picks = (ledge.count() as f32 * rate * dt * 2.0 + self.random.next()) as usize;
             for _ in 0..picks {
                 let column = ((self.random.next() * ledge.count() as f32) as usize).min(ledge.count() - 1);
@@ -1743,8 +1150,7 @@ impl Air {
                 ledge.set(column, h * 0.5);
                 let velocity = carried + V2::new(self.random.range(-80.0, 80.0), self.random.range(50.0, 200.0));
                 let position = V2::new(ledge.center_x(column), ledge.floor(column) + h * 0.5);
-                let leaves = (h - LEAF_COVER).max(0.0).min(h * 0.5) / (h * 0.5);
-                self.release_leaves(h * 0.5 * COLUMN_WIDTH, leaves, position, velocity, V2::new(COLUMN_WIDTH / 2.0, h * 0.5), 0.25);
+                self.release(h * 0.5 * COLUMN_WIDTH, position, velocity, V2::new(COLUMN_WIDTH / 2.0, h * 0.5), 0.25);
             }
             if picks > 0 {
                 self.heights_changed = true;
@@ -1809,17 +1215,8 @@ impl Air {
     }
 
     /// Turns part of a ledge's snow into falling snow where it lies: a few columns at a time hold together
-    /// as a lump, the rest pours off as powder. A heap of leaves thrown off `as_leaves` shows as the leaves it is
-    /// made of; one left by a window closing or hiding goes unseen, leaving only the leaves lying on it to fall.
-    fn shed(&mut self, ledge: &mut SnowLayer, share: f32, velocity: V2, as_leaves: bool) {
-        let shown = if self.autumn && as_leaves {
-            // The leaves lying on top go along with the rest, and count among the leaves the heap shows.
-            let area = ledge.heights.iter().map(|h| h.max(0.0)).sum::<f32>() * share * COLUMN_WIDTH;
-            let seen = ledge.heights.iter().map(|h| (h - LEAF_COVER).max(0.0)).sum::<f32>() * share * COLUMN_WIDTH;
-            if area > 0.0 { (seen / LEAF_SHOWN - ledge.lying_leaves).max(0.0) * LEAF_SHOWN / area } else { 0.0 }
-        } else {
-            0.0
-        };
+    /// as a lump, the rest pours off as powder.
+    fn shed(&mut self, ledge: &mut SnowLayer, share: f32, velocity: V2) {
         let mut start = 0;
         while start < ledge.count() {
             let end = ledge.count().min(start + self.random.range(2.0, 7.0) as usize);
@@ -1835,7 +1232,7 @@ impl Air {
                 lowest = lowest.min(ledge.floor(i) + h * (1.0 - share));
                 highest = highest.max(ledge.floor(i) + h);
             }
-            let cohesion = if area > 14.0 && !self.autumn { self.random.range(0.4, 0.7) } else { 0.0 };
+            let cohesion = if area > 14.0 { self.random.range(0.4, 0.7) } else { 0.0 };
             for i in start..end {
                 let h = ledge.heights[i];
                 if h <= 0.05 {
@@ -1844,7 +1241,7 @@ impl Air {
                 let amount = h * share;
                 ledge.set(i, h - amount);
                 let position = V2::new(ledge.center_x(i), ledge.floor(i) + h - amount);
-                self.release_leaves(amount * COLUMN_WIDTH * (1.0 - cohesion), shown, position, velocity, V2::new(COLUMN_WIDTH / 2.0, amount), 0.25);
+                self.release(amount * COLUMN_WIDTH * (1.0 - cohesion), position, velocity, V2::new(COLUMN_WIDTH / 2.0, amount), 0.25);
             }
             if cohesion > 0.0 {
                 let left = ledge.center_x(start);
@@ -1857,10 +1254,6 @@ impl Air {
     }
 
     fn throw_lump(&mut self, area: f32, position: V2, velocity: V2) {
-        if self.autumn {
-            self.release(area, position, velocity, V2::new(4.0, 2.0), 0.5);
-            return;
-        }
         let pieces = (area / 90.0) as usize + 1;
         let share = area / pieces as f32;
         for _ in 0..pieces {
@@ -1876,8 +1269,6 @@ impl Air {
                 size: (share.sqrt() * 1.05).min(11.0),
                 lump: random.range(0.05, 1.0),
                 blown: false,
-                seed: random.range(0.001, 1.0),
-                bulk: false,
             });
         }
     }
@@ -1912,37 +1303,6 @@ impl Air {
         }
     }
 
-    /// `scatter` varies each clump's speed by that fraction, so a thrown sheet of snow breaks up instead of flying as one band.
-    /// As `release`, with `leaves` of what comes off a heap of leaves showing as the leaves it is made of.
-    fn release_leaves(&mut self, area: f32, leaves: f32, position: V2, velocity: V2, spread: V2, scatter: f32) {
-        if self.autumn && leaves > 0.0 && area > 0.02 {
-            let count = ((area * leaves / LEAF_SHOWN + self.random.next()) as usize)
-                .min(MAX_GRAINS.saturating_sub(self.grains.len()))
-                .min(self.leaf_budget.max(0.0) as usize);
-            self.leaf_budget -= count as f32;
-            // The leaves carry the bulk along, so the heap makes up again just where and when they land.
-            for _ in 0..count {
-                let depth = self.random.range(0.3, 1.0);
-                let size = self.leaf_length(depth);
-                let random = &mut self.random;
-                self.grains.push(Grain {
-                    position: position + V2::new(random.range(-spread.x, spread.x), random.range(0.0, spread.y)),
-                    velocity: velocity * (1.0 + random.range(-scatter, scatter)) + V2::new(random.range(-40.0, 40.0), random.range(10.0, 60.0)),
-                    area: area / count as f32,
-                    size,
-                    lump: 0.0,
-                    blown: false,
-                    seed: random.range(0.001, 1.0),
-                    bulk: false,
-                });
-            }
-            if count > 0 {
-                return;
-            }
-        }
-        self.release(area, position, velocity, spread, scatter);
-    }
-
     fn release(&mut self, area: f32, position: V2, velocity: V2, spread: V2, scatter: f32) {
         if area <= 0.02 {
             return;
@@ -1952,25 +1312,7 @@ impl Air {
             self.overflow.push((area, position.x));
             return;
         }
-        if self.autumn {
-            // The bulk goes unseen and makes up a heap again wherever it lands; whatever leaves show come off above.
-            let count = room.min((area / LEAF_AREA) as usize + 1).min(4);
-            let share = area / count as f32;
-            for _ in 0..count {
-                let random = &mut self.random;
-                self.grains.push(Grain {
-                    position: position + V2::new(random.range(-spread.x, spread.x), random.range(0.0, spread.y)),
-                    velocity: velocity * (1.0 + random.range(-scatter, scatter)) + V2::new(random.range(-30.0, 30.0), random.range(0.0, 40.0)),
-                    area: share,
-                    size: 2.0,
-                    lump: 0.0,
-                    blown: false,
-                    seed: random.range(0.001, 1.0),
-                    bulk: true,
-                });
-            }
-            return;
-        }
+
         let count = room.min(((area / 3.0) as usize).clamp(1, 6));
         let share = area / count as f32;
         for _ in 0..count {
@@ -1983,8 +1325,6 @@ impl Air {
                 size: (share.sqrt() * 1.05).clamp(1.1, 5.0),
                 lump: 0.0,
                 blown: false,
-                seed: random.range(0.001, 1.0),
-                bulk: false,
             });
         }
     }
@@ -2008,7 +1348,7 @@ impl Air {
         }
 
         let local = center.y - base.y;
-        let spray_share = if self.autumn { smoothstep(60.0, 500.0, velocity.length()) } else { smoothstep(60.0, 420.0, velocity.length()) };
+        let spray_share = smoothstep(60.0, 420.0, velocity.length());
         let mut pushed_left = 0.0;
         let mut pushed_right = 0.0;
 
@@ -2051,12 +1391,8 @@ impl Air {
             self.last_cursor_push = self.clock;
             self.heights_changed = true;
 
-            let mut area = removed * COLUMN_WIDTH;
-            if self.autumn {
-                // The lying leaves on top fly off by themselves; only the mass under them is swept out.
-                let hidden = (LEAF_COVER - if buried { h - top } else { 0.0 }).max(0.0);
-                area = (removed - hidden).max(0.0) * COLUMN_WIDTH;
-            }
+            let area = removed * COLUMN_WIDTH;
+
             let surface = layer.floor(i) + if buried { h - removed } else { h };
             let sprayed = if spray_share > 0.0 { self.emit(area * spray_share, V2::new(x, surface), center, velocity) } else { 0.0 };
             let side = if velocity.x.abs() > 40.0 { velocity.x } else { dx };
@@ -2087,32 +1423,6 @@ impl Air {
         let length = offset.length();
         let outward = if length > 0.001 { offset / length } else { V2::new(0.0, 1.0) };
 
-        if self.autumn {
-            // Leaves swept out of a heap skim along the way the cursor goes, a whole leaf at a time.
-            let leaves = ((area / LEAF_AREA + self.random.next()) as usize).min(3);
-            if leaves == 0 {
-                return 0.0;
-            }
-            for _ in 0..leaves {
-                let push = velocity + outward * (speed * self.random.range(0.05, 0.15));
-                let velocity = self.swept(push);
-                let depth = self.random.next().powf(1.2);
-                let size = self.leaf_length(depth);
-                let random = &mut self.random;
-                self.grains.push(Grain {
-                    position: origin + V2::new(random.range(-2.0, 2.0), random.range(0.0, 3.0)),
-                    velocity,
-                    area: area / leaves as f32,
-                    size,
-                    lump: 0.0,
-                    blown: false,
-                    seed: random.range(0.001, 1.0),
-                    bulk: false,
-                });
-            }
-            return area;
-        }
-
         for _ in 0..count {
             let random = &mut self.random;
             let mut v = velocity * random.range(0.55, 1.25) + outward * (speed * random.range(0.05, 0.25));
@@ -2125,8 +1435,6 @@ impl Air {
                 size: (share.sqrt() * 1.05).clamp(1.1, 4.2),
                 lump: 0.0,
                 blown: false,
-                seed: random.range(0.001, 1.0),
-                bulk: false,
             });
         }
         area
@@ -2154,9 +1462,6 @@ impl Air {
     }
 
     fn make_flake(&mut self, width: f32, y: f32) -> Flake {
-        if self.autumn {
-            return self.make_leaf(width, y);
-        }
         let wind = self.wind_speed();
         let random = &mut self.random;
         let near = random.next() < 0.02;
@@ -2178,50 +1483,7 @@ impl Air {
             tint: [1.0; 3],
             tint_amount: 0.0,
             blown: 0.0,
-            leaf: 0.0,
         }
-    }
-
-    fn make_leaf(&mut self, width: f32, y: f32) -> Flake {
-        let wind = self.wind_speed();
-        let depth = self.random.next().powf(1.2);
-        let size = self.leaf_length(depth);
-        let random = &mut self.random;
-        let fall_speed = 24.0 + depth * 36.0 + random.range(0.0, 12.0);
-        Flake {
-            position: V2::new(random.range(-30.0, width + 30.0), y),
-            velocity: V2::new(wind * (0.35 + 0.65 * depth), -fall_speed),
-            fall_speed,
-            size,
-            depth,
-            alpha: 0.88 + depth * 0.12,
-            soft: 0.0,
-            phase: random.range(0.0, PHASE_WRAP),
-            sway_rate: random.range(1.1, 2.0),
-            sway_amount: random.range(26.0, 46.0) + depth * 20.0,
-            settles: true,
-            mass: 1.0,
-            tint: [1.0; 3],
-            tint_amount: 0.0,
-            blown: 0.0,
-            leaf: random.range(0.001, 1.0),
-        }
-    }
-
-    fn leaf_length(&mut self, depth: f32) -> f32 {
-        7.0 + depth * 7.0 + self.random.range(0.0, 2.5)
-    }
-
-    /// A leaf the cursor sweeps along: it goes the cursor's way a little slower, barely lifting, and the air soon
-    /// slows it down, so it lands a short way off.
-    fn swept(&mut self, velocity: V2) -> V2 {
-        let random = &mut self.random;
-        let mut v = velocity * random.range(0.5, 0.9);
-        let speed = v.length();
-        if speed > 450.0 {
-            v *= 450.0 / speed;
-        }
-        v + V2::new(random.range(-20.0, 20.0), random.range(10.0, 35.0) + speed * random.range(0.03, 0.1))
     }
 
     /// The air a moving cursor drags along, which carries off what falls through it: where it is and how fast it
@@ -2257,8 +1519,7 @@ impl Air {
 
     /// A pinch of snow torn off by the gust: a grain of powder, now and then with a faint puff around it.
     fn lift(&mut self, position: V2, direction: f32) {
-        // Of a heap of leaves only the lying ones fly off; the bulk under them just goes.
-        if self.grains.len() >= MAX_GRAINS || self.autumn {
+        if self.grains.len() >= MAX_GRAINS {
             return;
         }
         let random = &mut self.random;
@@ -2269,8 +1530,6 @@ impl Air {
             size: random.range(1.1, 2.6),
             lump: 0.0,
             blown: true,
-            seed: random.range(0.001, 1.0),
-            bulk: false,
         });
         if random.next() >= 0.35 || self.motes.len() >= MAX_MOTES {
             return;
@@ -2299,8 +1558,6 @@ impl Air {
             size: random.range(1.1, 2.4),
             lump: 0.0,
             blown: false,
-            seed: random.range(0.001, 1.0),
-            bulk: false,
         });
         if random.next() >= 0.3 || self.motes.len() >= MAX_MOTES {
             return;
@@ -2316,11 +1573,10 @@ impl Air {
     }
 }
 
-/// How a flake actually moves: carried along, swaying from side to side, and for a leaf, swinging like a pendulum,
-/// dropping fastest through the middle of each swing.
+/// How a flake actually moves: carried along and swaying from side to side.
 fn motion(flake: &Flake) -> V2 {
     let sway = (flake.phase.cos() + 0.3 * (flake.phase * 2.3).cos()) * flake.sway_amount;
-    let flutter = if flake.leaf > 0.0 { 0.3 + 1.1 * flake.phase.cos().abs() } else { 1.0 + 0.12 * (flake.phase * 1.3).sin() };
+    let flutter = 1.0 + 0.12 * (flake.phase * 1.3).sin();
     V2::new(flake.velocity.x + sway, flake.velocity.y * flutter)
 }
 
@@ -2333,46 +1589,6 @@ fn stir(velocity: &mut V2, position: V2, wake: (V2, V2), dt: f32) {
     }
     let falloff = 1.0 - distance_squared.sqrt() / radius;
     *velocity += (wake.1 - *velocity) * (falloff * falloff * 4.0 * dt).min(1.0);
-}
-
-fn spin(clock: f64, rate: f32) -> f32 {
-    ((clock * rate as f64) % std::f64::consts::TAU) as f32
-}
-
-/// How a leaf in the air tumbles about its length.
-fn tumble(clock: f64, seed: f32) -> f32 {
-    (spin(clock, 0.5 + seed * 1.1) + seed * 50.0).cos()
-}
-
-fn tumble_speed(clock: f64, seed: f32) -> f32 {
-    -(spin(clock, 0.5 + seed * 1.1) + seed * 50.0).sin() * (0.5 + seed * 1.1)
-}
-
-fn flake_turn(clock: f64, flake: &Flake) -> f32 {
-    flake.leaf * 40.0 + flake.phase.sin() * 0.6 + spin(clock, flake.leaf - 0.5)
-}
-
-fn grain_turn(clock: f64, grain: &Grain) -> f32 {
-    grain.seed * 40.0 + spin(clock, (grain.seed - 0.5) * 9.0)
-}
-
-/// A lying leaf follows the slope under it.
-fn resting_turn(leaf: &LyingLeaf, layer: &SnowLayer, i: usize) -> f32 {
-    let left = i.saturating_sub(2);
-    let right = (i + 2).min(layer.count() - 1);
-    let slope = (layer.surface(right) - layer.surface(left)) / ((right - left).max(1) as f32 * layer.column_width);
-    slope.atan() + leaf.tilt + leaf.around
-}
-
-fn wrapped(angle: f32) -> f32 {
-    let a = angle % TAU;
-    if a > PI {
-        a - TAU
-    } else if a < -PI {
-        a + TAU
-    } else {
-        a
-    }
 }
 
 /// Where the gust's front is `age` seconds in, coming in from `margin` past the windward edge of a display `width` wide.
@@ -2436,12 +1652,6 @@ fn smooth_damp(current: &mut V2, velocity: &mut V2, target: V2, time: f32, dt: f
     let temp = (*velocity + change * omega) * dt;
     *velocity = (*velocity - temp * omega) * decay;
     *current = target + (change + temp) * decay;
-}
-
-/// How fast a shaken heap of leaves comes apart: the share of its columns, and of the leaves lying on it, thrown off
-/// in half a second.
-fn leaf_shake_rate(agitation: f32) -> f32 {
-    (0.3 * (agitation - LEAF_SHAKING).max(0.0)).min(0.8)
 }
 
 /// How high the snow lying just past one end of a window's ledge comes up that end, from below or beside it: a heap

@@ -188,17 +188,6 @@ impl Tracker {
         surfaces
     }
 
-    /// Every app window on one display, maximized and full-screen ones too, left, bottom, right, top in its overlay
-    /// coordinates: a pumpkin hides from any that covers it. Open menus and the shell's switchers and flyouts don't count.
-    pub fn covers(&self, area: &RECT, size: (u32, u32)) -> Vec<[f32; 4]> {
-        self.windows
-            .iter()
-            .filter(|window| !window.cover_only && window.class != "#32768")
-            .filter_map(|window| local_frame(&window.rect, area, size))
-            .map(|frame| [frame.min_x(), frame.min_y(), frame.max_x(), frame.max_y()])
-            .collect()
-    }
-
     /// The full-screen window covering the display with these bounds, if any: the frontmost window on it,
     /// looking past small always-on-top ones and the shell's switchers and flyouts, fills it entirely. A maximized
     /// window counts only when the shell also sees a full-screen app, since it fills the display too wherever the
