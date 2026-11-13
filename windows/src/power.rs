@@ -13,8 +13,7 @@ pub struct Power {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Strength {
     Full,
-    /// Half the snowfall, and frames within a budget: none above 60 a second, which are hard to tell apart in snow
-    /// anyway, and under saver calm snow drawn less often still.
+    /// Half the snowfall, and frames within a budget: see [`frame_rates`].
     Half,
     /// No snow and no frames: Pause on battery, unplugged.
     Paused,
@@ -40,6 +39,15 @@ pub fn strength(power: Power, pause_on_battery: bool) -> Strength {
     } else {
         Strength::Full
     }
+}
+
+/// The frame rates the snow may draw at on a display drawing `display` frames a second: for calm snow, and the fastest,
+/// for snow being pushed around. At half strength nothing above 60, which is hard to tell apart in snow anyway; under
+/// saver, calm snow at 24 where that divides the display's rate evenly, as elsewhere it would judder.
+pub fn frame_rates(power: Power, display: u32) -> (u32, u32) {
+    let fastest = if strength(power, false) == Strength::Half { display.min(60) } else { display };
+    let calm = if power.saver && display.is_multiple_of(24) { 24 } else { 30 };
+    (calm, fastest)
 }
 
 #[cfg(test)]
@@ -72,5 +80,14 @@ mod tests {
         assert_eq!(strength(BATTERY_SAVER, true), Strength::Paused);
         assert_eq!(strength(MAINS_SAVER, true), Strength::Half, "saver while plugged in is no reason to pause");
         assert_eq!(Strength::Paused.density(), 0.0);
+    }
+
+    #[test]
+    fn frames_are_capped_at_half_strength_and_calm_snow_slows_under_saver() {
+        assert_eq!(frame_rates(MAINS, 144), (30, 144));
+        assert_eq!(frame_rates(BATTERY, 144), (30, 60));
+        assert_eq!(frame_rates(BATTERY_SAVER, 144), (24, 60));
+        assert_eq!(frame_rates(MAINS_SAVER, 120), (24, 60));
+        assert_eq!(frame_rates(BATTERY_SAVER, 60), (30, 60), "24 doesn't divide 60");
     }
 }

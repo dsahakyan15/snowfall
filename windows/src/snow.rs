@@ -74,6 +74,8 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
     let mut clock = Clock::new();
     let started = Clock::now();
     let mut active = true;
+    // The shell is watched from the start, as the snow runs.
+    let mut was_running = true;
     let mut sky = Sky::now();
     let wallpapers = Wallpapers::new().inspect_err(|error| log!("wallpapers unavailable: {error}")).ok();
     let mut chores_at = 0;
@@ -123,16 +125,8 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
                     let direction = screens.first().map_or(-1.0, |screen| screen.simulation.breeze_direction());
                     screens.iter_mut().for_each(|screen| screen.simulation.blow_away(direction, calm));
                 }
-                Command::PowerChanged => {
-                    power = read_power();
-                    log!("power: {power:?}");
-                    apply_power(&mut screens, power, &settings);
-                }
+                Command::PowerChanged => refresh_power(&mut power, &mut screens, &settings),
                 Command::Active(on) => {
-                    if on && !active {
-                        screens.iter_mut().for_each(Screen::resume);
-                    }
-                    tracker::watch_shell_state(on);
                     active = on;
                     log!("active: {on}");
                 }
@@ -176,12 +170,7 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
                 DISPLAYS_CHANGED.set(true);
             }
             // In case a change of power went unannounced.
-            let next = read_power();
-            if next != power {
-                power = next;
-                log!("power: {power:?}");
-                apply_power(&mut screens, power, &settings);
-            }
+            refresh_power(&mut power, &mut screens, &settings);
             screens.iter().for_each(Screen::raise);
             // Behind windows, the overlays live inside Explorer's windows and vanish when it restarts; until the
             // wallpaper layer is found they wait on top of everything instead.
@@ -211,6 +200,14 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
 
         // Paused on battery, the screens are hidden and nothing runs, as when locked; a change of power wakes the thread.
         let running = active && power::strength(power, settings.pause_on_battery) != Strength::Paused;
+        if running != was_running {
+            // Back from a pause the snow picks up from now; while it is stopped the shell needn't be asked about full screen.
+            if running {
+                screens.iter_mut().for_each(Screen::resume);
+            }
+            tracker::watch_shell_state(running);
+            was_running = running;
+        }
         if running {
             // A drag starting is drawn right away instead of at the next calm frame.
             if tracker.take_started_moving() {
@@ -260,7 +257,9 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
                 // and waking for each would cost more than the snow.
                 WaitForMultipleObjects(&[wake, timer], false, INFINITE);
             } else {
-                MsgWaitForMultipleObjectsEx(Some(&[wake]), INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+                // Paused on battery, it still looks once a second for a change of power or displays that went unannounced.
+                let timeout = if active { 1000 } else { INFINITE };
+                MsgWaitForMultipleObjectsEx(Some(&[wake]), timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
             }
         }
     }
@@ -359,6 +358,17 @@ fn read_power() -> Power {
         return Power::default();
     }
     Power { battery: status.ACLineStatus == 0, saver: status.SystemStatusFlag == 1 }
+}
+
+/// Reads the power state and, if it changed, gives the screens the strength it calls for. Windows reports every change
+/// of charge too, so most reports change nothing.
+fn refresh_power(power: &mut Power, screens: &mut [Screen], settings: &Settings) {
+    let next = read_power();
+    if next != *power {
+        *power = next;
+        log!("power: {power:?}");
+        apply_power(screens, next, settings);
+    }
 }
 
 /// Gives every screen the strength the power source and Pause on battery call for.

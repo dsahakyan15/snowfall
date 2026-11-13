@@ -30,7 +30,7 @@ use snowfall_core::simulation::{Pace, SnowSimulation, WindowId, WindowSurface};
 use crate::desktop::DesktopLayer;
 use crate::light::{Backdrop, Sky, Wallpapers};
 use crate::log;
-use crate::power::Power;
+use crate::power::{self, Power};
 use crate::render::{Ambient, Gpu, Surface};
 use crate::settings::Settings;
 use crate::tracker::{COVER_ONLY, Tracker, class_name, cloaked, process_name};
@@ -362,10 +362,7 @@ impl Screen {
             self.next_due = now + clock.frequency;
             return Ok(false);
         }
-        // On battery or saver, no frame rates above 60, which are hard to tell apart in snow anyway.
-        let fastest = if power.battery || power.saver { self.interactive_rate.min(60) } else { self.interactive_rate };
-        // 24 only where it divides the display's rate evenly; elsewhere it would judder.
-        let calm = if power.saver && self.interactive_rate % 24 == 0 { 24 } else { 30 };
+        let (calm, fastest) = power::frame_rates(power, self.interactive_rate);
         let rate = match self.simulation.pace() {
             Pace::Calm => calm,
             Pace::Lively => fastest.min(60),
