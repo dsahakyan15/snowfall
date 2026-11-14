@@ -16,8 +16,8 @@ use windows::Win32::System::SystemServices::{GUID_CONSOLE_DISPLAY_STATE, GUID_PO
 use windows::Win32::System::Threading::{CreateEventW, SetEvent};
 use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetSystemMetricsForDpi};
 use windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_SELECT, NOTIFYICON_VERSION_4, NOTIFYICONDATAW,
-    Shell_NotifyIconW,
+    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_SELECT,
+    NOTIFYICON_VERSION_4, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, PCWSTR, Result, w};
@@ -114,7 +114,8 @@ pub fn run() -> Result<()> {
         let mut settings = Settings::load(&Registry);
         // The first run registers autostart, as Open at login is on by default; later runs leave the entry alone,
         // so starting another copy, such as a development build, never takes it over.
-        if !registry::has_settings() {
+        let first_run = !registry::has_settings();
+        if first_run {
             settings.open_at_login = registry::set_open_at_login(settings.open_at_login);
             settings.save(&mut Registry);
         }
@@ -126,6 +127,10 @@ pub fn run() -> Result<()> {
         let light = light_taskbar();
         let icon = tray_icon(light);
         add_tray_icon(window, icon);
+        if first_run {
+            log!("first run");
+            notify(window, Language::from_langid(GetUserDefaultUILanguage()).strings().first_run);
+        }
         let _ = WTSRegisterSessionNotification(window, NOTIFY_FOR_THIS_SESSION);
         let _ = RegisterPowerSettingNotification(HANDLE(window.0), &GUID_CONSOLE_DISPLAY_STATE, DEVICE_NOTIFY_WINDOW_HANDLE);
         let _ = RegisterPowerSettingNotification(HANDLE(window.0), &GUID_POWER_SAVING_STATUS, DEVICE_NOTIFY_WINDOW_HANDLE);
@@ -411,4 +416,26 @@ fn menu_screens() -> Vec<menu::Screen> {
             primary: monitor.primary,
         })
         .collect()
+}
+
+/// A notification from the tray icon, as Windows shows it: a toast on Windows 10 and 11.
+fn notify(window: HWND, text: &str) {
+    let mut data = NOTIFYICONDATAW {
+        cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: window,
+        uID: 1,
+        uFlags: NIF_INFO,
+        dwInfoFlags: NIIF_INFO,
+        ..Default::default()
+    };
+    // The text fields are fixed arrays; whatever doesn't fit is cut, leaving room for the closing NUL.
+    for (slot, unit) in data.szInfoTitle.iter_mut().take(63).zip("Snowfall".encode_utf16()) {
+        *slot = unit;
+    }
+    for (slot, unit) in data.szInfo.iter_mut().take(255).zip(text.encode_utf16()) {
+        *slot = unit;
+    }
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
+    }
 }
