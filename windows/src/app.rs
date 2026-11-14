@@ -17,7 +17,7 @@ use windows::Win32::System::Threading::{CreateEventW, SetEvent};
 use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetSystemMetricsForDpi};
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_SELECT,
-    NOTIFYICON_VERSION_4, NOTIFYICONDATAW, Shell_NotifyIconW,
+    NOTIFYICON_VERSION_4, NOTIFYICONDATAW, Shell_NotifyIconW, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, PCWSTR, Result, w};
@@ -26,13 +26,18 @@ use crate::log;
 use crate::menu::{self, Action, Context, Item};
 use crate::registry::{self, Registry};
 use crate::screen;
-use crate::settings::{Change, Settings};
+use crate::settings::{Change, Settings, Store};
 use crate::snow::{self, Command, Links};
 use crate::strings::Language;
+use crate::update as releases;
 
 const CLASS: PCWSTR = w!("SnowfallController");
 const WM_TRAY: u32 = WM_APP + 1;
 const NIN_KEYSELECT: u32 = NIN_SELECT | 1;
+const NIN_BALLOONUSERCLICK: u32 = WM_USER + 5;
+/// A look for updates finished: `lparam` is a `Box<Lookup>`.
+const WM_UPDATES: u32 = WM_APP + 2;
+const TIMER_UPDATES: usize = 1;
 
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
@@ -88,6 +93,10 @@ struct App {
     locked: bool,
     display_off: bool,
     away: bool,
+    /// The page of a newer release the last notification told of, opened when it is clicked.
+    release_page: Option<String>,
+    /// A look for updates is under way.
+    checking: bool,
 }
 
 thread_local! {
@@ -134,7 +143,21 @@ pub fn run() -> Result<()> {
         let _ = WTSRegisterSessionNotification(window, NOTIFY_FOR_THIS_SESSION);
         let _ = RegisterPowerSettingNotification(HANDLE(window.0), &GUID_CONSOLE_DISPLAY_STATE, DEVICE_NOTIFY_WINDOW_HANDLE);
         let _ = RegisterPowerSettingNotification(HANDLE(window.0), &GUID_POWER_SAVING_STATUS, DEVICE_NOTIFY_WINDOW_HANDLE);
-        APP.set(Some(App { settings, commands, wake, snow, icon, light, locked: false, display_off: false, away: false }));
+        APP.set(Some(App {
+            settings,
+            commands,
+            wake,
+            snow,
+            icon,
+            light,
+            locked: false,
+            display_off: false,
+            away: false,
+            release_page: None,
+            checking: false,
+        }));
+        // The first look for updates waits a little after start-up, then the hourly timer decides when one is due.
+        SetTimer(Some(window), TIMER_UPDATES, 30_000, None);
 
         let mut message = MSG::default();
         while GetMessageW(&mut message, None, 0, 0).as_bool() {
@@ -153,7 +176,24 @@ unsafe extern "system" fn procedure(window: HWND, message: u32, wparam: WPARAM, 
                 let x = (wparam.0 & 0xffff) as i16 as i32;
                 let y = ((wparam.0 >> 16) & 0xffff) as i16 as i32;
                 show_menu(window, x, y);
+            } else if event == NIN_BALLOONUSERCLICK {
+                open_release_page();
             }
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == TIMER_UPDATES => {
+            unsafe {
+                let _ = SetTimer(Some(window), TIMER_UPDATES, 60 * 60 * 1000, None);
+            }
+            let last = Registry.number("lastUpdateCheck").map(u64::from);
+            if releases::due(last, unix_now()) {
+                check_for_updates(window, false);
+            }
+            LRESULT(0)
+        }
+        WM_UPDATES => {
+            let lookup = unsafe { Box::from_raw(lparam.0 as *mut Lookup) };
+            finish_update_check(window, *lookup, wparam.0 != 0);
             LRESULT(0)
         }
         WM_WTSSESSION_CHANGE => {
@@ -282,7 +322,7 @@ fn native_menu(items: &[Item], actions: &mut Vec<Action>) -> Option<HMENU> {
 fn choose(window: HWND, action: Action) {
     match action {
         Action::Quit => quit(window),
-        Action::CheckForUpdates => {}
+        Action::CheckForUpdates => check_for_updates(window, true),
         Action::ClearSnow => APP.with_borrow(|app| {
             if let Some(app) = app {
                 send(app, Command::ClearSnow(!animations_enabled()));
@@ -438,4 +478,81 @@ fn notify(window: HWND, text: &str) {
     unsafe {
         let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
     }
+}
+
+/// What a look for updates found.
+enum Lookup {
+    /// Offline, or GitHub didn't answer: nothing is said, and the next look is soon.
+    Failed,
+    UpToDate,
+    Newer(releases::Release),
+}
+
+/// Looks on GitHub for a newer release on a thread of its own; the answer comes back as `WM_UPDATES`.
+fn check_for_updates(window: HWND, manual: bool) {
+    let started = APP.with_borrow_mut(|app| match app {
+        Some(app) if !app.checking => {
+            app.checking = true;
+            true
+        }
+        _ => false,
+    });
+    if !started {
+        return;
+    }
+    let target = window.0 as isize;
+    let _ = thread::Builder::new().name("updates".into()).spawn(move || {
+        let lookup = match releases::fetch() {
+            None => Lookup::Failed,
+            Some(answer) => releases::newer(&answer, env!("CARGO_PKG_VERSION")).map_or(Lookup::UpToDate, Lookup::Newer),
+        };
+        let lookup = Box::into_raw(Box::new(lookup));
+        unsafe {
+            if PostMessageW(Some(HWND(target as _)), WM_UPDATES, WPARAM(manual as usize), LPARAM(lookup as isize)).is_err() {
+                drop(Box::from_raw(lookup));
+            }
+        }
+    });
+}
+
+fn finish_update_check(window: HWND, lookup: Lookup, manual: bool) {
+    let strings = Language::from_langid(unsafe { GetUserDefaultUILanguage() }).strings();
+    if !matches!(lookup, Lookup::Failed) {
+        Registry.set_number("lastUpdateCheck", unix_now() as u32);
+    }
+    match lookup {
+        Lookup::Failed => log!("update check failed"),
+        Lookup::UpToDate => {
+            log!("up to date");
+            if manual {
+                notify(window, strings.up_to_date);
+            }
+        }
+        Lookup::Newer(release) => {
+            log!("update available: {}", release.version);
+            notify(window, &strings.update_available.replace("{version}", &release.version));
+            APP.with_borrow_mut(|app| {
+                if let Some(app) = app {
+                    app.release_page = Some(release.url);
+                }
+            });
+        }
+    }
+    APP.with_borrow_mut(|app| {
+        if let Some(app) = app {
+            app.checking = false;
+        }
+    });
+}
+
+/// Opens the page of the release the notification told of, in the browser.
+fn open_release_page() {
+    let Some(url) = APP.with_borrow(|app| app.as_ref().and_then(|app| app.release_page.clone())) else { return };
+    unsafe {
+        ShellExecuteW(None, w!("open"), &HSTRING::from(url), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs())
 }
