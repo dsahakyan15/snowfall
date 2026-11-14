@@ -36,6 +36,16 @@ which writes `dist\Snowfall-Setup.exe`.
 
 Set the version in `windows/Cargo.toml`, then push a tag for it, such as `v0.1.0`. The release workflow builds and tests Snowfall, builds the installer, and publishes both `Snowfall-Setup.exe` and `Snowfall.exe` as a GitHub Release. A tag with a pre-release part, such as `v0.2.0-beta.1`, makes a pre-release.
 
+## Contributing
+
+`cargo test` runs the snow engine's headless tests and the app's own. What only a real desktop can show is in the [manual QA checklist](docs/qa-checklist.md), run before each release, together with the performance check:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\measure.ps1
+```
+
+which runs the release build for a minute and fails if it takes more than 5% of one core or 80 MB while it runs. Words for the snow and its places are in [GLOSSARY.md](GLOSSARY.md), and decisions in [docs/adr](docs/adr).
+
 ## Licence
 
 Licensed under `MIT OR Apache-2.0`: either the [MIT licence](LICENSE-MIT) or the [Apache License 2.0](LICENSE-APACHE), at your option.
