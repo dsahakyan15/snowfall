@@ -1,0 +1,64 @@
+name: Release
+
+# A `v*` tag builds Snowfall, its installer and a portable exe, and publishes them as a GitHub Release.
+# Run by hand, or for a pull request that touches the installer, it builds the same and keeps them as a workflow
+# artifact, with no release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  pull_request:
+    paths: ["installer/**", ".github/workflows/release.yml"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: rustup update stable --no-self-update && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Version
+        id: version
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' windows/Cargo.toml | head -1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME doesn't match the app's version $version in windows/Cargo.toml"
+            exit 1
+          fi
+      - name: Build
+        run: cargo build --release --locked
+      - name: Test
+        run: cargo test --release --locked
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup --no-progress -y }
+          if (-not (Test-Path $iscc)) { throw "Inno Setup wasn't found at $iscc" }
+          "ISCC=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Installer
+        shell: pwsh
+        run: |
+          & $env:ISCC "/DVersion=${{ steps.version.outputs.version }}" installer\Snowfall.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item target\release\Snowfall.exe dist\Snowfall.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: snowfall-${{ steps.version.outputs.version }}
+          path: dist/
+      - name: GitHub Release
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=""
+          case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/Snowfall-Setup.exe dist/Snowfall.exe \
+            --title "Snowfall ${{ steps.version.outputs.version }}" --generate-notes $prerelease
