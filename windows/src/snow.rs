@@ -10,7 +10,7 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, MB_ICONERROR, MB_OK, MSG, MWMO_INPUTAVAILABLE, MessageBoxW, MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, PostMessageW,
-    QS_ALLINPUT, TranslateMessage, WM_CLOSE,
+    QS_ALLINPUT, QS_MOUSE, TranslateMessage, WM_CLOSE,
 };
 use windows::core::{HSTRING, PCWSTR, Result, w};
 
@@ -18,6 +18,7 @@ use snowfall_core::simulation::SnowSimulation;
 
 use crate::carry::Carry;
 use crate::desktop::{self, DesktopLayer};
+use crate::grab::Grabs;
 use crate::light::{Sky, Wallpapers};
 use crate::log;
 use crate::power::{self, Power, Strength};
@@ -87,6 +88,7 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
     let mut stats = Stats::new(started);
     let mut tracker = Tracker::new();
     let mut carry = Carry::default();
+    let mut grabs = Grabs::default();
     watch_taskbar(links.wake);
 
     loop {
@@ -217,6 +219,7 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
             was_running = running;
         }
         if running {
+            grabs.input(&mut screens, now);
             // A drag starting is drawn right away instead of at the next calm frame.
             if tracker.take_started_moving() {
                 screens.iter_mut().for_each(|screen| screen.wake(now));
@@ -272,6 +275,8 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
             stats.report(&clock, now, &mut tracker);
         }
 
+        grabs.sync(&mut screens, &settings, running, now);
+
         let due = screens.iter().map(|screen| screen.next_due).min().filter(|_| running);
         unsafe {
             if let Some(due) = due {
@@ -279,7 +284,13 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
                 let _ = SetWaitableTimer(timer, &wait, 0, None, None, false);
                 // Messages wait for the next frame: window reports arrive with every mouse move,
                 // and waking for each would cost more than the snow.
-                WaitForMultipleObjects(&[wake, timer], false, INFINITE);
+                if grabs.has_windows() {
+                    // Hit windows need prompt mouse input, including while a resting scene draws slowly; window reports
+                    // still wait for the next frame.
+                    MsgWaitForMultipleObjectsEx(Some(&[wake, timer]), INFINITE, QS_MOUSE, MWMO_INPUTAVAILABLE);
+                } else {
+                    WaitForMultipleObjects(&[wake, timer], false, INFINITE);
+                }
             } else {
                 // Paused on battery, it still looks once a second for a change of power or displays that went unannounced.
                 let timeout = if active { 1000 } else { INFINITE };

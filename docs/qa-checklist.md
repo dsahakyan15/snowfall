@@ -11,7 +11,7 @@ Start from a clean profile where an item says so: quit Snowfall, delete `HKCU\So
 
 ## Staying out of the way
 
-- [ ] Clicks, drags, scrolling and right-clicks all go through the snow to the windows and desktop under it.
+- [ ] Away from a Snowball, clicks, drags, scrolling and right-clicks all go through the snow to the windows and desktop under it.
 - [ ] Snowfall never takes keyboard focus: type in an editor while toggling settings from the tray.
 - [ ] Snowfall doesn't appear in Alt+Tab, Win+Tab or on the taskbar; only the tray icon shows.
 - [ ] Screenshots (Win+Shift+S, PrtScn), the Snipping Tool, a screen recording and a Teams/Zoom/browser screen share don't show the snow by default.
@@ -45,6 +45,9 @@ Start from a clean profile where an item says so: quit Snowfall, delete `HKCU\So
 - [ ] Switching virtual desktops and back keeps each window's snow.
 - [ ] Snapping or maximizing a window with Win+arrows drops its snow rather than carrying it.
 - [ ] **Snowballs**: sweep through deep snow to roll a round, shaded ball with turning dimples and a contact shadow; shallow snow makes none. Let go: it rests, follows its window and allows idle CPU to return to 0%. Check Ledge ends, window shedding/closing, Clear snow, Opacity, fade-out and the saved EN/RU toggle.
+- [ ] **Grabbing Snowballs**: the hand cursor and left press catch only the ball's visible circle, including when another window covers part of it. Click beside it and through its bounding-box corners: the app beneath receives the click. Drag and release over a Ledge and empty space: the ball falls onto that Ledge or the Ground. Move, minimize, close, fling and maximize its supporting window: the ball rides or falls intact.
+- [ ] Keep an editor focused while grabbing and dropping a ball: Snowfall never takes keyboard focus. Move quickly outside the ball before releasing, and interrupt a drag with Alt+Tab: the ball never stays stuck to the pointer.
+- [ ] Grabbed, falling and resting balls and their hit windows are absent from screenshots and recordings by default; **Show in screenshots** includes them. Full screen, sleep, lock, **Pause on battery**, **Screens** off and **Snowballs** off leave no invisible click targets. **Behind windows** disables grabbing. Quit leaves no hit windows behind.
 - [ ] Sweeping the pointer through a Pile parts it; a fast sweep sends snow flying; falling flakes swirl in the pointer's wake.
 
 ## Settings
@@ -63,6 +66,7 @@ Start from a clean profile where an item says so: quit Snowfall, delete `HKCU\So
 - [ ] Unchecking a screen stops its snow at once; checking it brings snow back. The choice survives a restart and unplugging and replugging that display.
 - [ ] Turning every screen off is allowed and behaves like Off.
 - [ ] Dragging a snowy window to another display carries its Pile along, subject to the usual sliding.
+- [ ] Grab a Snowball and drag it across monitors in both directions, including different DPI settings and vertically arranged displays: one ball follows the pointer with the grab offset, releases on the destination screen and falls onto its Ledge or Ground. Disable or unplug either screen during a drag: no stuck capture or invisible click target remains. Balls on a carried Pile currently return to its snow.
 - [ ] A window resting across two displays shows one Pile along its whole top, with no seam or doubled snow at the boundary, and snow builds up on both parts.
 - [ ] With displays at different scaling (such as 100% and 150%), flakes and Piles look the same physical size on both, and a carried Pile keeps its size.
 - [ ] Changing resolution, scaling or arrangement while running needs no restart.

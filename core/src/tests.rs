@@ -112,20 +112,184 @@ fn disabling_snowballs_returns_their_area_to_the_pile() {
 }
 
 #[test]
-fn snowballs_on_a_disappearing_or_jumping_window_break_back_into_snow() {
+fn snowballs_on_a_disappearing_or_jumping_window_fall_whole() {
     for jumps in [false, true] {
         let mut simulation = snowball_pile(20.0);
         roll_snowball(&mut simulation, 20.0);
         run(&mut simulation, 30.0, AWAY);
+        // Isolate the ball's conservation from the existing powder and Pile shedding rules.
+        let ball = simulation.take_snowball(simulation.snowballs()[0].id).unwrap();
+        simulation.drain_pile(7);
+        simulation.bring_snowball(ball);
         let before = simulation.snow_area();
-        let windows = if jumps { vec![surface(7, 200.0, 300.0, 1000.0)] } else { vec![] };
+        let windows = if jumps { vec![surface(7, 1300.0, 300.0, 1000.0)] } else { vec![] };
         simulation.update_windows(&windows, 1.0 / 120.0, &HashSet::new(), &HashSet::new(), false);
-        assert!(simulation.snowballs().is_empty(), "balls floated after the window shed its Pile");
-        // Shedding a Pile rounds away sub-grain amounts; the ball itself goes to the Ground whole.
+        assert_eq!(simulation.snowballs()[0].state, SnowballState::Falling);
+        let area = simulation.snowballs()[0].area();
+        // Shedding a Pile rounds away sub-grain amounts; the ball itself keeps its area.
         assert!((simulation.snow_area() - before).abs() < before * 0.0001, "snow area {before} -> {}", simulation.snow_area());
-        simulation.step(DT, AWAY);
+        run(&mut simulation, 3.0, AWAY);
+        assert_eq!(simulation.snowballs()[0].area(), area);
+        assert_eq!(simulation.snowballs()[0].state, SnowballState::Resting { on: Surface::Ground });
         assert!((simulation.snow_area() - before).abs() < before * 0.001);
-        assert!(piles(&simulation).iter().any(|(origin, area)| origin.y == 0.0 && *area > 100.0));
+    }
+}
+
+fn resting_ball() -> SnowSimulation {
+    let mut simulation = snowball_pile(20.0);
+    roll_snowball(&mut simulation, 20.0);
+    run(&mut simulation, 30.0, AWAY);
+    simulation
+}
+
+#[test]
+fn grabbed_snowballs_fall_onto_the_ledge_under_them_or_the_ground() {
+    for (x, on) in [(500.0, Surface::Ledge(7)), (1200.0, Surface::Ground)] {
+        let mut simulation = resting_ball();
+        let ball = simulation.snowballs()[0];
+        assert!(simulation.grab(ball.id, ball.center));
+        simulation.move_held(V2::new(x, 650.0));
+        assert!(simulation.step(DT, AWAY));
+        simulation.release(V2::ZERO);
+        assert!(simulation.step(DT, AWAY));
+        assert_eq!(simulation.snowballs()[0].state, SnowballState::Falling);
+        run(&mut simulation, 3.0, AWAY);
+        let dropped = simulation.snowballs()[0];
+        assert_eq!(dropped.id, ball.id);
+        assert_eq!(dropped.area(), ball.area());
+        assert_eq!(dropped.state, SnowballState::Resting { on });
+        assert!((dropped.center.x - x).abs() < 0.01);
+        assert!(!simulation.step(DT, AWAY));
+    }
+}
+
+#[test]
+fn held_snowballs_keep_the_grab_offset_ignore_windows_and_take_no_snow() {
+    let mut simulation = resting_ball();
+    let ball = simulation.snowballs()[0];
+    let offset = V2::new(2.0, 3.0);
+    assert_eq!(simulation.snowball_at(ball.center), Some(ball.id));
+    assert_eq!(simulation.snowball_at(ball.center + V2::new(ball.radius + 1.0, 0.0)), None);
+    assert!(!simulation.grab(ball.id, AWAY));
+    assert!(simulation.grab(ball.id, ball.center - offset));
+    let before = simulation.snow_area();
+    for i in 0..60 {
+        let point = V2::new(400.0 + i as f32, 310.0);
+        simulation.move_held(point);
+        simulation.update_windows(&[surface(7, 125.0, 312.0, 1000.0)], DT, &HashSet::new(), &HashSet::new(), true);
+        assert!(simulation.step(DT, point));
+        let held = simulation.snowballs()[0];
+        assert_eq!(held.state, SnowballState::Held);
+        assert_eq!(held.center, point + offset);
+        assert_eq!(held.radius, ball.radius);
+        assert_eq!(simulation.snowballs().len(), 1);
+    }
+    assert!((simulation.snow_area() - before).abs() < 0.05);
+    simulation.update_windows(&[], DT, &HashSet::new(), &HashSet::new(), false);
+    simulation.step(DT, AWAY);
+    assert_eq!(simulation.snowballs()[0].state, SnowballState::Held);
+}
+
+#[test]
+fn held_snowballs_transfer_between_simulations_without_changing_identity_or_area() {
+    let mut from = resting_ball();
+    let mut to = resting_ball();
+    let original = from.snowballs()[0];
+    assert_ne!(original.id, to.snowballs()[0].id);
+    assert!(from.grab(original.id, original.center - V2::new(3.0, 2.0)));
+    let before = from.snow_area() + to.snow_area();
+    let mut ball = from.take_snowball(original.id).unwrap();
+    assert!(from.take_snowball(original.id).is_none());
+    ball.map_to((0.75, 0.75), (-100.0, 20.0));
+    to.bring_snowball(ball);
+    to.move_held(V2::new(500.0, 600.0));
+    let transferred = to.snowballs().iter().find(|ball| ball.id == original.id).unwrap();
+    assert_eq!(transferred.center, V2::new(502.25, 601.5));
+    assert_eq!(transferred.area(), original.area());
+    assert_eq!(transferred.angle, original.angle);
+    assert_eq!(transferred.state, SnowballState::Held);
+    assert!((from.snow_area() + to.snow_area() - before).abs() < 0.05);
+    to.release(V2::ZERO);
+    run(&mut to, 3.0, AWAY);
+    assert_eq!(to.snowballs().iter().find(|ball| ball.id == original.id).unwrap().state, SnowballState::Resting { on: Surface::Ledge(7) });
+}
+
+#[test]
+fn falling_snowballs_use_the_highest_visible_ledge_and_clamp_to_the_screen() {
+    let mut simulation = resting_ball();
+    let ball = simulation.snowballs()[0];
+    let mut hidden = surface(8, 100.0, 500.0, 1000.0);
+    // Cover this Ledge without adding another supporting edge above it.
+    hidden.blockers.push(Rect { x: 200.0, y: 400.0, width: 500.0, height: 200.0 });
+    simulation.update_windows(&[hidden, surface(7, 100.0, 300.0, 1000.0)], DT, &HashSet::new(), &HashSet::new(), false);
+    assert!(simulation.grab(ball.id, ball.center));
+    simulation.move_held(V2::new(500.0, 700.0));
+    simulation.release(V2::ZERO);
+    run(&mut simulation, 2.0, AWAY);
+    assert_eq!(simulation.snowballs()[0].state, SnowballState::Resting { on: Surface::Ledge(7) });
+    simulation.update_windows(&[surface(8, 100.0, 500.0, 1000.0), surface(7, 100.0, 300.0, 1000.0)], DT, &HashSet::new(), &HashSet::new(), false);
+    let ball = simulation.snowballs()[0];
+    assert!(simulation.grab(ball.id, ball.center));
+    simulation.move_held(V2::new(500.0, 700.0));
+    simulation.release(V2::ZERO);
+    run(&mut simulation, 2.0, AWAY);
+    assert_eq!(simulation.snowballs()[0].state, SnowballState::Resting { on: Surface::Ledge(8) });
+    for x in [-500.0, 2000.0] {
+        let ball = simulation.snowballs()[0];
+        assert!(simulation.grab(ball.id, ball.center));
+        simulation.move_held(V2::new(x, 700.0));
+        simulation.release(V2::new(x, -200.0));
+        run(&mut simulation, 3.0, AWAY);
+        let ball = simulation.snowballs()[0];
+        assert_eq!(ball.state, SnowballState::Resting { on: Surface::Ground });
+        assert!(ball.center.x >= ball.radius && ball.center.x + ball.radius <= simulation.width());
+    }
+}
+
+#[test]
+fn a_snowball_on_an_empty_ledge_is_shed_by_a_fling_with_the_windows_velocity() {
+    let mut simulation = resting_ball();
+    let ball = simulation.take_snowball(simulation.snowballs()[0].id).unwrap();
+    simulation.drain_pile(7);
+    simulation.bring_snowball(ball);
+    let before = simulation.snow_area();
+    let mut fell = false;
+    // A steady fast downward drag pulls the support out from under the ball without a jump.
+    for i in 1..=20 {
+        simulation.update_windows(&[surface(7, 100.0, 300.0 - i as f32 * 40.0, 1000.0)], DT, &HashSet::new(), &HashSet::new(), false);
+        simulation.step(DT, AWAY);
+        if simulation.snowballs()[0].state == SnowballState::Falling {
+            assert_ne!(simulation.snowballs()[0].velocity, V2::ZERO);
+            fell = true;
+            break;
+        }
+    }
+    assert!(fell, "an empty Pile must not prevent a ball from falling with a fling");
+    simulation.update_windows(&[], DT, &HashSet::new(), &HashSet::new(), false);
+    run(&mut simulation, 2.0, AWAY);
+    assert_eq!(simulation.snowballs()[0].state, SnowballState::Resting { on: Surface::Ground });
+    assert!((simulation.snow_area() - before).abs() < 0.05);
+}
+
+#[test]
+fn disabling_snowballs_or_clearing_returns_held_and_falling_snow() {
+    for held in [false, true] {
+        let mut simulation = resting_ball();
+        let ball = simulation.snowballs()[0];
+        let before = simulation.snow_area();
+        assert!(simulation.grab(ball.id, ball.center));
+        simulation.move_held(V2::new(700.0, 650.0));
+        if !held {
+            simulation.release(V2::ZERO);
+        }
+        simulation.set_snowballs(false);
+        assert!(simulation.snowballs().is_empty());
+        assert!((simulation.snow_area() - before).abs() < 0.05);
+        simulation.step(DT, AWAY);
+        assert!((simulation.snow_area() - before).abs() < 0.05);
+        simulation.blow_away(1.0, true);
+        run(&mut simulation, 5.0, AWAY);
+        assert!(simulation.is_empty());
     }
 }
 

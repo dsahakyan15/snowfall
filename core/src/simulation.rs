@@ -6,7 +6,7 @@ use std::ops::Range;
 
 use crate::geometry::{Rect, V2, smoothstep};
 use crate::layer::{SnowLayer, sample};
-use crate::play::{SnowPlay, Snowball, SnowballState, Surface};
+use crate::play::{SnowPlay, Snowball, SnowballId, SnowballState, Surface};
 
 pub type WindowId = isize;
 
@@ -465,10 +465,53 @@ impl SnowSimulation {
         &self.play.balls
     }
 
+    /// The topmost visible Snowball under this point, using its circular outline.
+    pub fn snowball_at(&self, point: V2) -> Option<SnowballId> {
+        self.play
+            .balls
+            .iter()
+            .rev()
+            .find(|ball| {
+                (point - ball.center).length_squared() <= ball.radius * ball.radius
+                    && !self.snowball_occluders(ball).iter().any(|b| point.x >= b[0] && point.x < b[2] && point.y >= b[1] && point.y < b[3])
+            })
+            .map(|ball| ball.id)
+    }
+
+    pub fn grab(&mut self, id: SnowballId, point: V2) -> bool {
+        if self.snowball_at(point) != Some(id) || !self.play.grab(id, point) {
+            return false;
+        }
+        self.air.windows_changed = true;
+        true
+    }
+
+    pub fn move_held(&mut self, point: V2) {
+        self.play.move_held(point);
+    }
+
+    /// Velocity is in points per second, positive up, as for loose snow.
+    pub fn release(&mut self, velocity: V2) {
+        self.play.release(velocity);
+        self.air.windows_changed = true;
+    }
+
+    pub fn take_snowball(&mut self, id: SnowballId) -> Option<Snowball> {
+        let index = self.play.balls.iter().position(|ball| ball.id == id)?;
+        self.air.windows_changed = true;
+        Some(self.play.balls.remove(index))
+    }
+
+    /// Takes a ball already mapped into this screen's coordinates, preserving its identity and area.
+    pub fn bring_snowball(&mut self, ball: Snowball) {
+        self.play.balls.push(ball);
+        self.air.windows_changed = true;
+    }
+
     pub fn snowball_occluders(&self, ball: &Snowball) -> &[[f32; 4]] {
         match ball.surface() {
-            Surface::Ground => &[],
-            Surface::Ledge(id) => self.ledge_index(id).map_or(&[], |li| self.layers[li].occluders.as_slice()),
+            Some(Surface::Ledge(id)) => self.ledge_index(id).map_or(&[], |li| self.layers[li].occluders.as_slice()),
+            _ => &[],
         }
     }
 
@@ -492,6 +535,10 @@ impl SnowSimulation {
         for (li, layer) in self.layers.iter_mut().enumerate() {
             let on = if li == 0 { Surface::Ground } else { Surface::Ledge(self.ids[li]) };
             self.play.return_to(on, layer);
+        }
+        // Held and Falling balls have no Pile; returning them to snow still keeps every point of area.
+        for ball in self.play.balls.drain(..) {
+            self.air.overflow.push((ball.area(), ball.center.x));
         }
     }
 
@@ -544,13 +591,21 @@ impl SnowSimulation {
         self.air.slide_wind = if wind.abs() < 1.0 { 0.0 } else { wind * (-dt / SLIDE_CALM).exp() };
         self.expire_parking();
         for (li, ledge) in self.layers.iter_mut().enumerate().skip(1) {
-            if self.air.carry(ledge, dt) {
-                self.play.break_on(Surface::Ledge(self.ids[li]), &mut self.air.overflow);
+            let on = Surface::Ledge(self.ids[li]);
+            let has_ball = self.play.balls.iter().any(|ball| ball.surface() == Some(on));
+            if let Some(velocity) = self.air.carry(ledge, dt, has_ball) {
+                self.play.shed_on(Surface::Ledge(self.ids[li]), velocity);
             }
         }
         // Follow window motion before testing whether the pointer is still pushing a ball.
         self.advance_snowballs(0.0);
-        self.track_cursor(cursor, dt);
+        if self.play.balls.iter().any(|ball| ball.state == SnowballState::Held) {
+            // A drag moves the ball without rolling up more snow or carving the Pile underneath it.
+            self.air.cursor = Some(cursor + CURSOR_OFFSET);
+            self.air.cursor_velocity = V2::ZERO;
+        } else {
+            self.track_cursor(cursor, dt);
+        }
         for (li, ledge) in self.layers.iter_mut().enumerate().skip(1) {
             self.air.confine(ledge, li, self.width, self.walls);
         }
@@ -584,7 +639,7 @@ impl SnowSimulation {
         // The steady trickle off window corners is a few tiny grains at a time; they read fine at the calm rate.
         let flying = air.grains.len() > 24
             || air.slide_wind.abs() > 20.0
-            || self.play.balls.iter().any(|ball| matches!(ball.state, SnowballState::Rolling { .. }));
+            || self.play.balls.iter().any(|ball| !matches!(ball.state, SnowballState::Resting { .. }));
         self.pace = if pushed {
             Pace::Interactive
         } else if flying {
@@ -606,6 +661,9 @@ impl SnowSimulation {
             if self.play.advance(layer, on, dt, self.air.clock) {
                 self.air.heights_changed = true;
             }
+        }
+        if dt > 0.0 && self.play.fall(&self.layers, &self.ids, self.width, dt, GRAVITY) {
+            self.air.heights_changed = true;
         }
     }
 
@@ -880,7 +938,7 @@ impl SnowSimulation {
                     self.air.pan(ledge, left, top);
                 } else {
                     if self.air.move_ledge(ledge, left, right, top, columns, interval) {
-                        self.play.break_on(Surface::Ledge(surface.id), &mut self.air.overflow);
+                        self.play.shed_on(Surface::Ledge(surface.id), V2::ZERO);
                     }
                 }
                 li
@@ -917,7 +975,7 @@ impl SnowSimulation {
 
         if !self.play.balls.is_empty() {
             for &id in self.ids.iter().skip(1).filter(|id| !seen.contains(id)) {
-                self.play.break_on(Surface::Ledge(id), &mut self.air.overflow);
+                self.play.shed_on(Surface::Ledge(id), V2::ZERO);
             }
         }
         let layers = std::mem::take(&mut self.layers);
@@ -990,7 +1048,7 @@ impl SnowSimulation {
                 let base = layer.base();
                 let touches_ball = self.play.balls.iter().any(|ball| {
                     let on = if li == 0 { Surface::Ground } else { Surface::Ledge(self.ids[li]) };
-                    ball.surface() == on
+                    ball.surface() == Some(on)
                         && low <= ball.center.y + ball.radius
                         && high >= ball.center.y - ball.radius
                         && right >= ball.center.x - ball.radius
@@ -1486,7 +1544,7 @@ impl Air {
     /// Moves a ledge's snow as a body riding on its window: it feels gravity plus the inertia of the
     /// window's acceleration, sticks by friction, slides when that's exceeded, and flies free when the
     /// window drops away faster than gravity or stops short after rising.
-    fn carry(&mut self, ledge: &mut SnowLayer, dt: f32) -> bool {
+    fn carry(&mut self, ledge: &mut SnowLayer, dt: f32, has_ball: bool) -> Option<V2> {
         let previous_velocity = ledge.track_velocity;
         smooth_damp(&mut ledge.track, &mut ledge.track_velocity, ledge.origin, TRACK_TIME, dt);
         let mut acceleration = (ledge.track_velocity - previous_velocity) / dt;
@@ -1506,10 +1564,10 @@ impl Air {
             }
         }
 
-        if ledge.top <= 0.05 {
+        if ledge.top <= 0.05 && !has_ball {
             ledge.offset = V2::ZERO;
             ledge.offset_velocity = V2::ZERO;
-            return false;
+            return None;
         }
 
         let mut lift = ledge.offset.y;
@@ -1565,7 +1623,7 @@ impl Air {
             self.shed(ledge, 1.0, carried);
             ledge.offset = V2::ZERO;
             ledge.offset_velocity = V2::ZERO;
-            return true;
+            return Some(carried);
         } else if ledge.agitation > shakes {
             // A granular bed shaken well past gravity throws grains off its surface.
             let rate = (0.06 * (ledge.agitation - shakes)).min(0.8);
@@ -1585,7 +1643,7 @@ impl Air {
                 self.heights_changed = true;
             }
         }
-        false
+        None
     }
 
     /// The part of a window slid past a wall carries no snow: the wall scrapes it off, and it heaps up against the
