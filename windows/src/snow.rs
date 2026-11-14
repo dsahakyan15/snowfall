@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::mpsc::Receiver;
 
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, WPARAM};
@@ -63,9 +64,9 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
     log!("adapter: {}", gpu.adapter);
     let _listener = listen()?;
     let mut layer = settings.behind_windows.then(find_layer).flatten();
-    let mut names = Names::new();
+    let mut layout = Layout::default();
     let mut power = read_power();
-    let mut screens = sync_screens(&gpu, &settings, &mut names, Vec::new(), layer, false, power);
+    let mut screens = sync_screens(&gpu, &settings, &mut layout, Vec::new(), layer, false, power);
     let timer = unsafe {
         CreateWaitableTimerExW(None, PCWSTR::null(), CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS.0)
             .or_else(|_| CreateWaitableTimerW(None, false, PCWSTR::null()))?
@@ -101,12 +102,17 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
                             screen.wake(now);
                         });
                     }
+                    // No longer shown over full screen, the overlays go back to the work area at once, paused or not.
+                    let stale = !(settings.show_over_full_screen && !settings.behind_windows) && !layout.full_screen.is_empty();
+                    if stale {
+                        layout.full_screen.clear();
+                    }
                     // Moving behind windows or back rebuilds every overlay; screens turned on or off only add or remove some.
                     if settings.behind_windows != previous.behind_windows {
                         layer = settings.behind_windows.then(find_layer).flatten();
-                        screens = sync_screens(&gpu, &settings, &mut names, screens, layer, true, power);
-                    } else if settings.screens_off != previous.screens_off {
-                        screens = sync_screens(&gpu, &settings, &mut names, screens, layer, false, power);
+                        screens = sync_screens(&gpu, &settings, &mut layout, screens, layer, true, power);
+                    } else if settings.screens_off != previous.screens_off || stale {
+                        screens = sync_screens(&gpu, &settings, &mut layout, screens, layer, false, power);
                     }
                     if settings.pause_on_battery != previous.pause_on_battery {
                         apply_power(&mut screens, power, &settings);
@@ -118,7 +124,7 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
                 Command::ShellRestarted => {
                     if settings.behind_windows {
                         layer = find_layer();
-                        screens = sync_screens(&gpu, &settings, &mut names, screens, layer, true, power);
+                        screens = sync_screens(&gpu, &settings, &mut layout, screens, layer, true, power);
                     }
                 }
                 Command::ClearSnow(calm) => {
@@ -153,7 +159,7 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
             if settings.behind_windows {
                 layer = find_layer();
             }
-            screens = sync_screens(&gpu, &settings, &mut names, screens, layer, false, power);
+            screens = sync_screens(&gpu, &settings, &mut layout, screens, layer, false, power);
             clock.refresh();
             light_at = 0;
         }
@@ -165,7 +171,7 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
             chores_at = now + clock.frequency;
             clock.refresh();
             // In case a display change went unannounced.
-            let current = snowy_monitors(&names, &settings);
+            let current = snowy_monitors(&layout, &settings);
             if current.len() != screens.len() || screens.iter().any(|screen| !current.contains(&screen.monitor)) {
                 DISPLAYS_CHANGED.set(true);
             }
@@ -178,7 +184,7 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
                 let found = find_layer();
                 if found.is_some() || screens.iter().any(|screen| !screen.alive()) {
                     layer = found;
-                    screens = sync_screens(&gpu, &settings, &mut names, screens, layer, true, power);
+                    screens = sync_screens(&gpu, &settings, &mut layout, screens, layer, true, power);
                 }
             }
             // Wallpaper apps share the layer the snow goes into; how they settle around it tells what went wrong.
@@ -220,14 +226,28 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
             let windows = &tracker;
             let time = (clock.seconds(now - started) % 1000.0) as f32;
             let mut lost = false;
+            // Shown over full screen, the snow stays, and reaches down to the bottom of the display, where the taskbar was.
+            let over = settings.show_over_full_screen && !settings.behind_windows;
             for screen in screens.iter_mut().filter(|screen| screen.next_due <= now + clock.tolerance()) {
-                let covering = tracker.covering(&screen.monitor.bounds);
+                let full_screen = tracker.covering(&screen.monitor.bounds);
+                let wanted = over && full_screen.is_some();
+                if wanted != layout.full_screen.contains(&screen.monitor.name) {
+                    if wanted {
+                        layout.full_screen.insert(screen.monitor.name.clone());
+                    } else {
+                        layout.full_screen.remove(&screen.monitor.name);
+                    }
+                    DISPLAYS_CHANGED.set(true);
+                }
+                let covering = full_screen.filter(|_| !over);
                 if covering.is_some() != screen.covered() {
                     log!("{} {}", screen.monitor.name, covering.map_or("uncovered".to_string(), |class| format!("covered by {class}")));
-                    screen.set_covered(covering.is_some());
+                    screen.next_due = screen.set_covered(&gpu, covering.is_some(), now, &clock);
                 }
                 if screen.covered() {
-                    screen.next_due = now + clock.frequency / 4;
+                    if screen.next_due <= now + clock.tolerance() {
+                        screen.next_due = screen.finish_fade(now, &clock);
+                    }
                     continue;
                 }
                 let began = Clock::now();
@@ -242,7 +262,7 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
             if lost {
                 screens.clear();
                 gpu = Gpu::new()?;
-                screens = sync_screens(&gpu, &settings, &mut names, Vec::new(), layer, false, power);
+                screens = sync_screens(&gpu, &settings, &mut layout, Vec::new(), layer, false, power);
             }
             now = Clock::now();
             stats.report(&clock, now, &mut tracker);
@@ -271,30 +291,34 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
 fn sync_screens(
     gpu: &Gpu,
     settings: &Settings,
-    names: &mut Names,
+    layout: &mut Layout,
     mut current: Vec<Screen>,
     layer: Option<DesktopLayer>,
     rebuild: bool,
     power: Power,
 ) -> Vec<Screen> {
     let mut result = Vec::new();
-    *names = display_names();
-    let displays = snowy_monitors(names, settings);
+    layout.names = display_names();
+    // Displays gone since can't be full screen.
+    let present: HashSet<String> = monitors(&layout.names).into_iter().map(|monitor| monitor.name).collect();
+    layout.full_screen.retain(|name| present.contains(name));
+    let displays = snowy_monitors(layout, settings);
 
     for monitor in displays.iter().cloned() {
         let kept = current.iter().position(|screen| screen.monitor.name == monitor.name);
-        let simulation = match kept.map(|i| current.swap_remove(i)) {
+        let (simulation, covered) = match kept.map(|i| current.swap_remove(i)) {
             Some(screen) if screen.monitor == monitor && !rebuild && screen.behind_windows() == layer.is_some() => {
                 result.push(screen);
                 continue;
             }
             Some(screen) => {
+                let covered = screen.covered();
                 let mut simulation = screen.simulation;
                 let (width, height) = dip_size(&monitor);
                 simulation.resize(width as f32, height as f32);
-                simulation
+                (simulation, covered)
             }
-            None => new_simulation(&monitor, settings),
+            None => (new_simulation(&monitor, settings), false),
         };
         log!(
             "display {} ({}, {}): {:?}, {} dpi, {} Hz",
@@ -314,7 +338,13 @@ fn sync_screens(
             Screen::new(gpu, monitor, simulation, settings, None)
         });
         match screen {
-            Ok(screen) => result.push(screen),
+            Ok(mut screen) => {
+                // A display a full-screen app covers stays clear of snow through the change.
+                if covered {
+                    screen.cover_now(gpu);
+                }
+                result.push(screen);
+            }
             Err((error, _)) => log!("overlay failed: {error}"),
         }
     }
@@ -325,10 +355,24 @@ fn sync_screens(
     result
 }
 
+/// What decides where the overlays go, beyond the displays themselves.
+#[derive(Default)]
+struct Layout {
+    /// The displays' stable identities and names, read when they change.
+    names: Names,
+    /// Displays a full-screen app covers while Show over full screen keeps the snow there, by GDI name.
+    full_screen: HashSet<String>,
+}
+
 /// The displays that get snow: all but those the person turned it off on. A screen turned off gets no overlay and
 /// its snow goes with it; to the screens beside it, it is no neighbour, so their snow heaps against that edge.
-fn snowy_monitors(names: &Names, settings: &Settings) -> Vec<Monitor> {
-    monitors(names).into_iter().filter(|monitor| settings.screen_on(&monitor.id)).collect()
+/// Over a full-screen app the snow reaches the bottom of the display, the taskbar being out of sight.
+fn snowy_monitors(layout: &Layout, settings: &Settings) -> Vec<Monitor> {
+    monitors(&layout.names)
+        .into_iter()
+        .filter(|monitor| settings.screen_on(&monitor.id))
+        .map(|monitor| if layout.full_screen.contains(&monitor.name) { Monitor { rect: monitor.bounds, ..monitor } } else { monitor })
+        .collect()
 }
 
 fn find_layer() -> Option<DesktopLayer> {

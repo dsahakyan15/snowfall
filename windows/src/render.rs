@@ -8,7 +8,8 @@ use windows::Win32::Graphics::Direct3D::{
 };
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::DirectComposition::{
-    DCOMPOSITION_BITMAP_INTERPOLATION_MODE_LINEAR, DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
+    DCOMPOSITION_BITMAP_INTERPOLATION_MODE_LINEAR, DCompositionCreateDevice, IDCompositionDevice, IDCompositionEffectGroup, IDCompositionTarget,
+    IDCompositionVisual,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32G32_FLOAT,
@@ -193,6 +194,8 @@ pub struct Surface {
     target_view: ID3D11RenderTargetView,
     _target: IDCompositionTarget,
     _visual: IDCompositionVisual,
+    /// The whole surface's opacity, for fading in and out.
+    effect: IDCompositionEffectGroup,
     width: u32,
     height: u32,
     sprites: Option<ID3D11Buffer>,
@@ -228,6 +231,8 @@ impl Surface {
             visual.SetContent(&swap_chain)?;
             visual.SetBitmapInterpolationMode(DCOMPOSITION_BITMAP_INTERPOLATION_MODE_LINEAR)?;
             visual.SetTransform2(&Matrix3x2 { M11: scale.0, M12: 0.0, M21: 0.0, M22: scale.1, M31: 0.0, M32: 0.0 })?;
+            let effect = gpu.composition.CreateEffectGroup()?;
+            visual.SetEffect(&effect)?;
             target.SetRoot(&visual)?;
             gpu.composition.Commit()?;
 
@@ -236,6 +241,7 @@ impl Surface {
                 target_view: target_view.ok_or_else(Error::empty)?,
                 _target: target,
                 _visual: visual,
+                effect,
                 width,
                 height,
                 sprites: None,
@@ -243,6 +249,25 @@ impl Surface {
                 heights: None,
                 height_capacity: 0,
             })
+        }
+    }
+
+    /// Sets the whole surface's opacity at once.
+    pub fn set_opacity(&self, gpu: &Gpu, opacity: f32) -> Result<()> {
+        unsafe {
+            self.effect.SetOpacity2(opacity)?;
+            gpu.composition.Commit()
+        }
+    }
+
+    /// Fades the whole surface from `from` to `to` opacity over `seconds`. The compositor plays it, so it costs no frames.
+    pub fn fade(&self, gpu: &Gpu, from: f32, to: f32, seconds: f64) -> Result<()> {
+        unsafe {
+            let animation = gpu.composition.CreateAnimation()?;
+            animation.AddCubic(0.0, from, (to - from) / seconds as f32, 0.0, 0.0)?;
+            animation.End(seconds, to)?;
+            self.effect.SetOpacity(&animation)?;
+            gpu.composition.Commit()
         }
     }
 
