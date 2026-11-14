@@ -44,15 +44,16 @@ Start from a clean profile where an item says so: quit Snowfall, delete `HKCU\So
 - [ ] Dragging a window slides its snow off; flinging or shaking it throws it into the air; closing or minimizing it drops its snow.
 - [ ] Switching virtual desktops and back keeps each window's snow.
 - [ ] Snapping or maximizing a window with Win+arrows drops its snow rather than carrying it.
+- [ ] **Snowballs**: sweep through deep snow to roll a round, shaded ball with turning dimples and a contact shadow; shallow snow makes none. Let go: it rests, follows its window and allows idle CPU to return to 0%. Check Ledge ends, window shedding/closing, Clear snow, Opacity, fade-out and the saved EN/RU toggle.
 - [ ] Sweeping the pointer through a Pile parts it; a fast sweep sends snow flying; falling flakes swirl in the pointer's wake.
 
 ## Settings
 
-- [ ] Every tray menu item works and is remembered after Quit and a restart: Snowfall (Off, Snow, Heavy snow), Wind (5), Screens, Opacity (5), Clear snow, Behind windows, Keep windows clear, Melt, Pause on battery, Show over full screen, Show in screenshots, Open at login.
+- [ ] Every tray menu item works and is remembered after Quit and a restart: Snowfall (Off, Snow, Heavy snow), Wind (5), Screens, Opacity (5), Clear snow, Behind windows, Keep windows clear, Snowballs, Melt, Pause on battery, Show over full screen, Show in screenshots, Open at login.
 - [ ] Off lets the falling snow finish; nothing new comes in.
 - [ ] Strong wind blows flakes and spray sideways and drifts window Piles toward the downwind end; light wind only slants the snowfall.
 - [ ] **Keep windows clear**: existing window snow melts within seconds, windows never build up more than a trace, and the Ground keeps only a thin layer.
-- [ ] **Opacity**: falling flakes fade at lower settings; Piles don't.
+- [ ] **Opacity**: falling flakes and Snowballs fade at lower settings; Piles don't.
 - [ ] **Clear snow** blows all settled snow away in a gust.
 - [ ] With Windows' display language set to Russian, the menu is in Russian; otherwise English.
 

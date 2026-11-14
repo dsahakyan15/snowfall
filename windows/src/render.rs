@@ -37,7 +37,9 @@ const _: () = assert!(
         && offset_of!(Sprite, tint_amount) == 28
         && offset_of!(Sprite, tint) == 32
         && offset_of!(Sprite, lump) == 44
-        && size_of::<Sprite>() == 48
+        && offset_of!(Sprite, ball) == 48
+        && offset_of!(Sprite, angle) == 52
+        && size_of::<Sprite>() == 56
 );
 
 /// Mirrors the shader's `Uniforms` constant buffer, register for register.
@@ -134,6 +136,8 @@ impl Gpu {
                 element(s!("TINTAMOUNT"), DXGI_FORMAT_R32_FLOAT, 28),
                 element(s!("TINTCOLOR"), DXGI_FORMAT_R32G32B32_FLOAT, 32),
                 element(s!("LUMP"), DXGI_FORMAT_R32_FLOAT, 44),
+                element(s!("BALL"), DXGI_FORMAT_R32_FLOAT, 48),
+                element(s!("ANGLE"), DXGI_FORMAT_R32_FLOAT, 52),
             ];
             let mut sprite_layout = None;
             device.CreateInputLayout(&elements, blob_bytes(&sprite_code), Some(&mut sprite_layout))?;
@@ -272,7 +276,7 @@ impl Surface {
     }
 
     pub fn draw(&mut self, gpu: &Gpu, simulation: &SnowSimulation, ambient: Ambient, time: f32) -> Result<()> {
-        self.reserve(gpu, simulation.sprite_count(), simulation.column_count())?;
+        self.reserve(gpu, simulation.sprite_count() + simulation.snowballs().len(), simulation.column_count())?;
         let (Some(sprite_buffer), Some((height_buffer, height_view))) = (&self.sprites, &self.heights) else {
             return Ok(());
         };
@@ -281,6 +285,8 @@ impl Surface {
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
             context.Map(sprite_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut mapped))?;
             let sprites = simulation.write_sprites(std::slice::from_raw_parts_mut(mapped.pData.cast::<Sprite>(), self.sprite_capacity));
+            let balls = simulation
+                .write_snowballs(std::slice::from_raw_parts_mut(mapped.pData.cast::<Sprite>().add(sprites), self.sprite_capacity - sprites));
             context.Unmap(sprite_buffer, 0);
 
             context.Map(height_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut mapped))?;
@@ -339,7 +345,7 @@ impl Surface {
                 }
             }
             uniforms.occluder_count = 0;
-            if sprites > 0 {
+            if sprites + balls > 0 {
                 gpu.write(&gpu.uniforms, &uniforms)?;
                 let stride = size_of::<Sprite>() as u32;
                 let offset = 0;
@@ -347,7 +353,17 @@ impl Surface {
                 context.IASetVertexBuffers(0, 1, Some(&Some(sprite_buffer.clone())), Some(&stride), Some(&offset));
                 context.VSSetShader(&gpu.sprite_vertex, None);
                 context.PSSetShader(&gpu.sprite_fragment, None);
-                context.DrawInstanced(4, sprites as u32, 0, 0);
+                if sprites > 0 {
+                    context.DrawInstanced(4, sprites as u32, 0, 0);
+                }
+                for (i, ball) in simulation.snowballs().iter().enumerate() {
+                    let occluders = simulation.snowball_occluders(ball);
+                    let count = occluders.len().min(MAX_OCCLUDERS);
+                    uniforms.occluder_count = count as i32;
+                    uniforms.occluders[..count].copy_from_slice(&occluders[..count]);
+                    gpu.write(&gpu.uniforms, &uniforms)?;
+                    context.DrawInstanced(4, 1, 0, (sprites + i) as u32);
+                }
             }
             self.swap_chain.Present(1, DXGI_PRESENT(0)).ok()
         }
@@ -402,6 +418,23 @@ fn compile(entry: PCSTR, target: PCSTR) -> Result<ID3DBlob> {
         return Err(Error::new(error.code(), message));
     }
     code.ok_or_else(Error::empty)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shaders_compile_without_a_display() {
+        for (entry, target) in [
+            (s!("spriteVertex"), s!("vs_4_0")),
+            (s!("spriteFragment"), s!("ps_4_0")),
+            (s!("pileVertex"), s!("vs_4_0")),
+            (s!("pileFragment"), s!("ps_4_0")),
+        ] {
+            compile(entry, target).expect("the shader must compile on supported D3D11 devices");
+        }
+    }
 }
 
 fn blob_bytes(blob: &ID3DBlob) -> &[u8] {

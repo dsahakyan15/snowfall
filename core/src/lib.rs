@@ -2,6 +2,7 @@
 
 pub mod geometry;
 pub mod layer;
+pub mod play;
 pub mod simulation;
 
 #[cfg(test)]
