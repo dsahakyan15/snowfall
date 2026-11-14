@@ -1,6 +1,7 @@
 //! Snow taken from Piles and rolled into Snowballs, without any platform input or drawing code.
 
 use std::f32::consts::{PI, TAU};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::geometry::V2;
 use crate::layer::SnowLayer;
@@ -11,8 +12,13 @@ const MAX_RADIUS: f32 = 40.0;
 const FORM_DEPTH: f32 = 14.0;
 const MIN_SPEED: f32 = 12.0;
 const MAX_BALLS: usize = 12;
-const COOLDOWN: f64 = 0.8;
+/// One long sweep rolls one or two balls, not a row of them.
+const COOLDOWN: f64 = 2.5;
 const FRICTION: f32 = 500.0;
+
+/// Shared by screens so a ball keeps its identity when carried between simulations.
+static NEXT_ID: AtomicU32 = AtomicU32::new(1);
+pub type SnowballId = u32;
 
 /// The support under a Snowball. Window identities survive changes in the order of Piles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,10 +31,13 @@ pub enum Surface {
 pub enum SnowballState {
     Rolling { on: Surface },
     Resting { on: Surface },
+    Held,
+    Falling,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct Snowball {
+    pub id: SnowballId,
     pub center: V2,
     pub radius: f32,
     pub velocity: V2,
@@ -37,13 +46,23 @@ pub struct Snowball {
     pub angle: f32,
     support_origin: V2,
     pushed_at: f64,
+    grab_offset: V2,
 }
 
 impl Snowball {
-    pub fn surface(&self) -> Surface {
+    pub fn surface(&self) -> Option<Surface> {
         match self.state {
-            SnowballState::Rolling { on } | SnowballState::Resting { on } => on,
+            SnowballState::Rolling { on } | SnowballState::Resting { on } => Some(on),
+            SnowballState::Held | SnowballState::Falling => None,
         }
+    }
+
+    /// Maps places and motion to another screen; radius and snow area stay in points.
+    pub fn map_to(&mut self, scale: (f32, f32), offset: (f32, f32)) {
+        self.center = V2::new(self.center.x * scale.0 + offset.0, self.center.y * scale.1 + offset.1);
+        self.velocity = V2::new(self.velocity.x * scale.0, self.velocity.y * scale.1);
+        self.grab_offset = V2::new(self.grab_offset.x * scale.0, self.grab_offset.y * scale.1);
+        self.support_origin = V2::new(self.support_origin.x * scale.0 + offset.0, self.support_origin.y * scale.1 + offset.1);
     }
 
     pub fn area(&self) -> f32 {
@@ -64,14 +83,14 @@ impl SnowPlay {
 
     /// Takes over the cursor's carving only where it is rolling a ball.
     pub fn sweep(&mut self, layer: &mut SnowLayer, on: Surface, point: V2, velocity: V2, dx: f32, clock: f64) -> bool {
-        if !self.enabled || velocity.x.abs() < MIN_SPEED || dx == 0.0 {
+        if !self.enabled || self.balls.iter().any(|ball| ball.state == SnowballState::Held) || velocity.x.abs() < MIN_SPEED || dx == 0.0 {
             return false;
         }
         let Some(column) = layer.index(point.x) else { return false };
         if !layer.visible[column] {
             return false;
         }
-        let nearby = self.balls.iter().position(|ball| ball.surface() == on && (point - ball.center).length() <= ball.radius + 18.0);
+        let nearby = self.balls.iter().position(|ball| ball.surface() == Some(on) && (point - ball.center).length() <= ball.radius + 18.0);
         let index = if let Some(index) = nearby {
             index
         } else {
@@ -92,6 +111,7 @@ impl SnowPlay {
                 return false;
             }
             self.balls.push(Snowball {
+                id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
                 center: V2::new(x, layer.surface(column)),
                 radius: (area / PI).sqrt(),
                 velocity: V2::ZERO,
@@ -99,6 +119,7 @@ impl SnowPlay {
                 angle: 0.0,
                 support_origin: layer.origin,
                 pushed_at: clock,
+                grab_offset: V2::ZERO,
             });
             self.next_spawn = clock + COOLDOWN;
             self.balls.len() - 1
@@ -114,7 +135,7 @@ impl SnowPlay {
     /// With the pointer gone, friction brings rolling to an exact stop. Resting balls only follow their support.
     pub fn advance(&mut self, layer: &mut SnowLayer, on: Surface, dt: f32, clock: f64) -> bool {
         let mut changed = false;
-        for ball in self.balls.iter_mut().filter(|ball| ball.surface() == on) {
+        for ball in self.balls.iter_mut().filter(|ball| ball.surface() == Some(on)) {
             let previous = ball.center;
             ball.center += layer.origin - ball.support_origin;
             ball.support_origin = layer.origin;
@@ -135,21 +156,88 @@ impl SnowPlay {
         changed
     }
 
-    /// A disappearing or shedding Ledge breaks its balls back into snow on the Ground.
-    pub fn break_on(&mut self, on: Surface, snow: &mut Vec<(f32, f32)>) {
-        self.balls.retain(|ball| {
-            if ball.surface() != on {
-                return true;
+    /// A disappearing or shedding Ledge lets its balls fall from where they were.
+    pub fn shed_on(&mut self, on: Surface, velocity: V2) {
+        for ball in self.balls.iter_mut().filter(|ball| ball.surface() == Some(on)) {
+            ball.state = SnowballState::Falling;
+            ball.velocity = velocity;
+        }
+    }
+
+    pub fn grab(&mut self, id: SnowballId, point: V2) -> bool {
+        if !self.enabled || self.balls.iter().any(|ball| ball.state == SnowballState::Held) {
+            return false;
+        }
+        let Some(ball) = self.balls.iter_mut().find(|ball| ball.id == id) else { return false };
+        if (point - ball.center).length_squared() > ball.radius * ball.radius {
+            return false;
+        }
+        ball.grab_offset = ball.center - point;
+        ball.state = SnowballState::Held;
+        ball.velocity = V2::ZERO;
+        true
+    }
+
+    pub fn move_held(&mut self, point: V2) {
+        for ball in self.balls.iter_mut().filter(|ball| ball.state == SnowballState::Held) {
+            ball.center = point + ball.grab_offset;
+        }
+    }
+
+    pub fn release(&mut self, velocity: V2) {
+        for ball in self.balls.iter_mut().filter(|ball| ball.state == SnowballState::Held) {
+            ball.state = SnowballState::Falling;
+            ball.velocity = velocity;
+        }
+    }
+
+    /// Falling uses the ball's underside, catches the first visible surface and always stops at the Ground.
+    pub fn fall(&mut self, layers: &[SnowLayer], ids: &[WindowId], width: f32, dt: f32, gravity: f32) -> bool {
+        let mut active = false;
+        for ball in &mut self.balls {
+            if ball.state == SnowballState::Held {
+                active = true;
             }
-            snow.push((ball.area(), ball.center.x));
-            false
-        });
+            if ball.state != SnowballState::Falling {
+                continue;
+            }
+            active = true;
+            let from = ball.center.y - ball.radius;
+            ball.velocity.y -= gravity * dt;
+            ball.center += ball.velocity * dt;
+            let margin = ball.radius.min(width * 0.5);
+            ball.center.x = ball.center.x.clamp(margin, width - margin);
+            let to = ball.center.y - ball.radius;
+            let mut hit = None;
+            let mut highest = -f32::MAX;
+            for (li, layer) in layers.iter().enumerate() {
+                let Some(i) = layer.index(ball.center.x) else { continue };
+                let surface = seat_height(layer, ball.center.x);
+                let visible = layer.visible[i]
+                    && !layer.occluders.iter().any(|b| ball.center.x >= b[0] && ball.center.x < b[2] && surface >= b[1] && surface < b[3]);
+                if (li == 0 || (visible && ball.velocity.y <= 0.0 && from >= layer.previous_base_y + layer.bed[i]))
+                    && to <= surface
+                    && surface > highest
+                {
+                    hit = Some(li);
+                    highest = surface;
+                }
+            }
+            if let Some(li) = hit {
+                let on = if li == 0 { Surface::Ground } else { Surface::Ledge(ids[li]) };
+                ball.state = SnowballState::Resting { on };
+                ball.velocity = V2::ZERO;
+                ball.support_origin = layers[li].origin;
+                seat(ball, &layers[li]);
+            }
+        }
+        active
     }
 
     /// Returns balls to this Pile, including at its ends, without discarding any area.
     pub fn return_to(&mut self, on: Surface, layer: &mut SnowLayer) {
         self.balls.retain(|ball| {
-            if ball.surface() != on {
+            if ball.surface() != Some(on) {
                 return true;
             }
             let first = layer.clamped_index(ball.center.x - ball.radius);
@@ -176,7 +264,11 @@ fn seat(ball: &mut Snowball, layer: &SnowLayer) {
     let width = support_width(layer);
     let radius = ball.radius.min(width * 0.5);
     ball.center.x = ball.center.x.clamp(layer.base().x + radius, layer.base().x + width - radius);
-    let at = (ball.center.x - layer.base().x) / layer.column_width - 0.5;
+    ball.center.y = seat_height(layer, ball.center.x) + ball.radius;
+}
+
+fn seat_height(layer: &SnowLayer, x: f32) -> f32 {
+    let at = (x - layer.base().x) / layer.column_width - 0.5;
     // Match the smoothed surface drawn by the renderer.
     let surface = |i: usize| {
         layer.bed[i] + 0.25 * layer.heights[i.saturating_sub(1)] + 0.5 * layer.heights[i] + 0.25 * layer.heights[(i + 1).min(layer.count() - 1)]
@@ -184,7 +276,7 @@ fn seat(ball: &mut Snowball, layer: &SnowLayer) {
     let at = at.clamp(0.0, (layer.count() - 1) as f32);
     let i = at.floor() as usize;
     let height = surface(i) + (surface((i + 1).min(layer.count() - 1)) - surface(i)) * (at - i as f32);
-    ball.center.y = layer.base().y + height + ball.radius;
+    layer.base().y + height
 }
 
 fn roll(ball: &mut Snowball, layer: &mut SnowLayer, distance: f32) {
@@ -200,7 +292,7 @@ fn roll(ball: &mut Snowball, layer: &mut SnowLayer, distance: f32) {
         ball.radius = ((ball.area() + taken) / PI).sqrt().min(MAX_RADIUS);
     } else {
         ball.velocity = V2::ZERO;
-        ball.state = SnowballState::Resting { on: ball.surface() };
+        ball.state = SnowballState::Resting { on: ball.surface().expect("rolling ball has a support") };
     }
     seat(ball, layer);
 }

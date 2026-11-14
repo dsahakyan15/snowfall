@@ -492,6 +492,15 @@ impl Screen {
         self.covered
     }
 
+    /// Input disappears as soon as a fade starts, so it never covers a full-screen app.
+    pub fn can_grab(&self) -> bool {
+        !self.covered && !self.paused && !self.faded_out && !self.behind_windows()
+    }
+
+    pub fn overlay_window(&self) -> HWND {
+        self.overlay.0
+    }
+
     /// Picks up the shadow colour again if the desktop picture changed.
     pub fn update_backdrop(&mut self, wallpapers: &Wallpapers) {
         let backdrop = wallpapers.backdrop(&self.monitor.bounds);
@@ -653,6 +662,11 @@ fn lowest_open_popup() -> Option<HWND> {
         }
         if extended & WS_EX_TRANSPARENT.0 == 0 && unsafe { IsWindowVisible(window) }.as_bool() && !cloaked(window) {
             let class = class_name(window);
+            // Snowball hit windows belong above their overlay, and are not app windows or shell menus.
+            if class == "SnowfallSnowball" {
+                next = unsafe { GetWindow(window, GW_HWNDNEXT) }.ok();
+                continue;
+            }
             let mut process = 0;
             unsafe { GetWindowThreadProcessId(window, Some(&mut process)) };
             let popup = class == "#32768"

@@ -3,6 +3,7 @@
 mod app;
 mod carry;
 mod desktop;
+mod grab;
 mod light;
 mod log;
 mod menu;
