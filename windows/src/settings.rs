@@ -11,7 +11,7 @@ pub use snowfall_core::simulation::Snowfall as Level;
 /// Which way, and how hard, the wind blows: the engine's own winds.
 pub use snowfall_core::simulation::Wind;
 
-/// How opaque falling snow is, in percent.
+/// How opaque falling snow and Snowballs are, in percent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Opacity(u8);
 
@@ -31,6 +31,7 @@ pub struct Settings {
     /// The screens the person turned snow off on, by their stable identity. Every other screen gets snow.
     pub screens_off: BTreeSet<String>,
     pub opacity: Opacity,
+    pub snowballs: bool,
     pub melt: bool,
     pub keep_windows_clear: bool,
     pub behind_windows: bool,
@@ -47,6 +48,7 @@ impl Default for Settings {
             wind: Wind::None,
             screens_off: BTreeSet::new(),
             opacity: Opacity(100),
+            snowballs: true,
             melt: true,
             keep_windows_clear: false,
             behind_windows: false,
@@ -66,6 +68,7 @@ pub enum Change {
     /// Turns snow on one screen, by its stable identity, on or off.
     Screen(String, bool),
     Opacity(Opacity),
+    Snowballs(bool),
     Melt(bool),
     KeepWindowsClear(bool),
     BehindWindows(bool),
@@ -87,6 +90,7 @@ impl Settings {
                 self.screens_off.insert(screen.clone());
             }
             Change::Opacity(opacity) => self.opacity = opacity,
+            Change::Snowballs(on) => self.snowballs = on,
             Change::Melt(on) => self.melt = on,
             Change::KeepWindowsClear(on) => self.keep_windows_clear = on,
             Change::BehindWindows(on) => self.behind_windows = on,
@@ -113,6 +117,7 @@ impl Settings {
                 .map(|text| text.split('\n').filter(|screen| !screen.is_empty()).map(str::to_owned).collect())
                 .unwrap_or(defaults.screens_off),
             opacity: store.number("opacity").and_then(|percent| Opacity::ALL.into_iter().find(|o| o.0 as u32 == percent)).unwrap_or(defaults.opacity),
+            snowballs: flag("snowballs", defaults.snowballs),
             melt: flag("melt", defaults.melt),
             keep_windows_clear: flag("keepWindowsClear", defaults.keep_windows_clear),
             behind_windows: flag("behindWindows", defaults.behind_windows),
@@ -128,6 +133,7 @@ impl Settings {
         store.set_number("wind", wind_code(self.wind));
         store.set_text("screensOff", &self.screens_off.iter().cloned().collect::<Vec<_>>().join("\n"));
         store.set_number("opacity", self.opacity.0 as u32);
+        store.set_number("snowballs", self.snowballs as u32);
         store.set_number("melt", self.melt as u32);
         store.set_number("keepWindowsClear", self.keep_windows_clear as u32);
         store.set_number("behindWindows", self.behind_windows as u32);
@@ -212,6 +218,7 @@ mod tests {
         assert_eq!(settings.wind, Wind::None);
         assert!(settings.screens_off.is_empty(), "every screen gets snow");
         assert_eq!(settings.opacity.percent(), 100);
+        assert!(settings.snowballs);
         assert!(settings.melt);
         assert!(!settings.keep_windows_clear);
         assert!(!settings.behind_windows);
@@ -233,6 +240,7 @@ mod tests {
             wind: Wind::StrongLeft,
             screens_off: ["\\\\?\\DISPLAY#A".to_owned(), "\\\\?\\DISPLAY#B".to_owned()].into(),
             opacity: Opacity(40),
+            snowballs: false,
             melt: false,
             keep_windows_clear: true,
             behind_windows: true,

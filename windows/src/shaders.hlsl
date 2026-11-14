@@ -31,6 +31,8 @@ struct SpriteIn {
     float tintAmount : TINTAMOUNT;
     float3 tintColor : TINTCOLOR;
     float lump : LUMP;
+    float ball : BALL;
+    float angle : ANGLE;
     uint vid : SV_VertexID;
 };
 
@@ -44,6 +46,8 @@ struct SpriteOut {
     float radius : RADIUS;
     float lump : LUMP;
     float spin : SPIN;
+    float ball : BALL;
+    float2 world : TEXCOORD1;
 };
 
 SpriteOut spriteVertex(SpriteIn s) {
@@ -54,11 +58,12 @@ SpriteOut spriteVertex(SpriteIn s) {
     float smear = min(length(travel), s.size * (s.lump > 0.0 ? 1.2 : 2.2));
     float2 streak = smear > 0.25 ? normalize(travel) * smear * scale : float2(0.0, 0.0);
     // A lump's ragged edge reaches past its nominal size.
-    float reach = s.lump > 0.0 ? 1.3 : 1.0;
+    float reach = (s.ball > 0.0 || s.lump > 0.0) ? 1.3 : 1.0;
     float extent = max(pixels * reach + length(streak), 2.0);
     SpriteOut o;
     float2 center = s.position / viewSize * 2.0 - 1.0;
     o.position = float4(center + (corner - 0.5) * extent * 2.0 / (viewSize * scale), 0.0, 1.0);
+    o.world = s.position + (corner - 0.5) * extent / scale;
     o.coord = float2(corner.x, 1.0 - corner.y);
     o.streak = streak / extent;
     o.radius = pixels / extent * 0.5;
@@ -68,6 +73,8 @@ SpriteOut spriteVertex(SpriteIn s) {
     o.tint = float4(s.tintColor, s.tintAmount);
     o.lump = s.lump;
     o.spin = s.lump > 0.0 ? time * (s.lump - 0.5) * 9.0 + s.lump * 40.0 : 0.0;
+    o.ball = s.ball;
+    if (s.ball > 0.0) o.spin = s.angle;
     return o;
 }
 
@@ -79,6 +86,33 @@ float4 spriteFragment(SpriteOut i) : SV_Target {
     float t = span > 0.0 ? clamp(dot(p, half_) / span, -1.0, 1.0) : 0.0;
     float2 d = p - half_ * t;
     float r = length(d) / max(i.radius, 0.001);
+    if (i.ball > 0.0) {
+        [loop]
+        for (int k = 0; k < occluderCount; k++) {
+            float4 blocker = occluders[k];
+            if (i.world.x >= blocker.x && i.world.x < blocker.z && i.world.y >= blocker.y && i.world.y < blocker.w) discard;
+        }
+        // Light stays at the upper left; only the small dimples turn with the Snowball.
+        float2 q = p / max(i.radius, 0.001);
+        float aa = max(fwidth(r), 0.008);
+        float body = 1.0 - smoothstep(1.0 - aa, 1.0 + aa, r);
+        float z = sqrt(saturate(1.0 - dot(q, q)));
+        float lit = saturate(dot(float3(q, z), normalize(float3(-0.5, 0.65, 1.0))));
+        float3 color = lerp(float3(0.72, 0.80, 0.90), float3(0.985, 0.992, 1.0), 0.4 + 0.6 * lit);
+        color = lerp(color, float3(0.64, 0.76, 0.88), smoothstep(0.88, 1.0, r) * 0.3);
+        float c = cos(i.spin), s = sin(i.spin);
+        float2 turned = float2(c * q.x + s * q.y, -s * q.x + c * q.y);
+        float2 cell = floor(turned * 5.0);
+        float2 spot = frac(turned * 5.0) - 0.5;
+        float dimple = (1.0 - smoothstep(0.04, 0.19, length(spot))) * step(0.73, hash(cell));
+        color -= dimple * 0.055 * (1.0 - smoothstep(0.75, 1.0, r));
+        float2 contact = float2(q.x / 0.9, (q.y + 0.97) / 0.16);
+        float shadow = exp(-dot(contact, contact) * 2.0) * 0.2 * (1.0 - body);
+        float a = (body + shadow) * i.alpha;
+        if (a < 0.002) discard;
+        float3 rgb = (color * body + float3(0.45, 0.55, 0.68) * shadow) * light.rgb * i.alpha;
+        return float4(rgb, a);
+    }
     float shading = 0.0;
     if (i.lump > 0.0) {
         float angle = atan2(d.y, d.x) + i.spin;

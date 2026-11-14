@@ -96,7 +96,7 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
                 Command::Quit => return Ok(()),
                 Command::Settings(next) => {
                     let previous = std::mem::replace(&mut settings, next);
-                    let snow = |s: &Settings| (s.level, s.wind, s.keep_windows_clear, s.melt, s.opacity);
+                    let snow = |s: &Settings| (s.level, s.wind, s.keep_windows_clear, s.snowballs, s.melt, s.opacity);
                     if snow(&settings) != snow(&previous) {
                         let now = Clock::now();
                         screens.iter_mut().for_each(|screen| {
@@ -396,6 +396,7 @@ fn new_simulation(monitor: &Monitor, settings: &Settings) -> SnowSimulation {
 fn configure(simulation: &mut SnowSimulation, settings: &Settings) {
     simulation.set_snowfall(settings.level);
     simulation.set_wind(settings.wind);
+    simulation.set_snowballs(settings.snowballs);
     simulation.set_keeps_windows_clear(settings.keep_windows_clear);
     simulation.thaws = settings.melt;
     simulation.set_opacity(settings.opacity.percent() as f32 / 100.0);

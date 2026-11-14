@@ -6,6 +6,7 @@ use std::ops::Range;
 
 use crate::geometry::{Rect, V2, smoothstep};
 use crate::layer::{SnowLayer, sample};
+use crate::play::{SnowPlay, Snowball, SnowballState, Surface};
 
 pub type WindowId = isize;
 
@@ -152,6 +153,9 @@ pub struct Sprite {
     pub tint: [f32; 3],
     /// Gives a lump of snow its ragged outline and tumble; zero for a round flake.
     pub lump: f32,
+    /// One for a Snowball, zero for a flake or loose snow.
+    pub ball: f32,
+    pub angle: f32,
 }
 
 /// A Pile as drawn, lent by the screen whose snow keeps it to a screen it reaches into, as a window straddling two
@@ -323,7 +327,7 @@ pub struct SnowSimulation {
     pace: Pace,
     snowfall: Snowfall,
     density: f32,
-    /// How opaque falling flakes are drawn, from 0 to 1; the snow on the ground and windows stays as it is.
+    /// How opaque falling flakes and Snowballs are drawn, from 0 to 1; Piles stay as they are.
     opacity: f32,
     pub thaws: bool,
     /// Snow on windows melts as it lands, and the Ground keeps only a thin Pile; apart from `thaws`.
@@ -344,13 +348,16 @@ pub struct SnowSimulation {
     borrowed: Vec<PileView>,
     space_changed_at: f64,
     target_flakes: usize,
+    play: SnowPlay,
     air: Air,
 }
 
 impl SnowSimulation {
     pub fn new(width: f32, height: f32, snowfall: Snowfall) -> SnowSimulation {
         let mut seed = Random::new();
-        let ground = SnowLayer::new(V2::ZERO, column_count(width), COLUMN_WIDTH, GROUND_DEPTH, false, (seed.range(0.0, TAU), seed.range(0.0, TAU)));
+        let mut ground =
+            SnowLayer::new(V2::ZERO, column_count(width), COLUMN_WIDTH, GROUND_DEPTH, false, (seed.range(0.0, TAU), seed.range(0.0, TAU)));
+        ground.right = width;
         let mut simulation = SnowSimulation {
             width,
             height,
@@ -370,6 +377,7 @@ impl SnowSimulation {
             borrowed: Vec::new(),
             space_changed_at: -10.0,
             target_flakes: 0,
+            play: SnowPlay::new(),
             air: Air {
                 flakes: Vec::new(),
                 grains: Vec::new(),
@@ -422,6 +430,8 @@ impl SnowSimulation {
     pub fn set_keeps_windows_clear(&mut self, on: bool) {
         if on && !self.keeps_windows_clear {
             self.forget_hidden_snow();
+            self.return_snowballs();
+            self.air.windows_changed = true;
         }
         self.keeps_windows_clear = on;
     }
@@ -431,7 +441,7 @@ impl SnowSimulation {
         self.air.wind = wind;
     }
 
-    /// How opaque falling flakes are drawn, from 0 to 1. Piles, and the snow thrown up from them, keep their look.
+    /// How opaque falling flakes and Snowballs are drawn, from 0 to 1. Piles and loose snow keep their look.
     pub fn set_opacity(&mut self, opacity: f32) {
         self.opacity = opacity.clamp(0.0, 1.0);
     }
@@ -442,14 +452,58 @@ impl SnowSimulation {
         self.update_target();
     }
 
+    /// Turning Snowballs off returns their snow to their supporting Piles.
+    pub fn set_snowballs(&mut self, on: bool) {
+        if !on && !self.play.balls.is_empty() {
+            self.return_snowballs();
+            self.air.windows_changed = true;
+        }
+        self.play.enabled = on;
+    }
+
+    pub fn snowballs(&self) -> &[Snowball] {
+        &self.play.balls
+    }
+
+    pub fn snowball_occluders(&self, ball: &Snowball) -> &[[f32; 4]] {
+        match ball.surface() {
+            Surface::Ground => &[],
+            Surface::Ledge(id) => self.ledge_index(id).map_or(&[], |li| self.layers[li].occluders.as_slice()),
+        }
+    }
+
+    /// Snow area in Piles, Snowballs and loose snow, including Piles kept out of sight.
+    /// Incoming flakes and decorative powder are excluded; snowfall, Melt and gusts change this total.
+    pub fn snow_area(&self) -> f32 {
+        let area = |pile: &SnowLayer| pile.heights.iter().sum::<f32>() * pile.column_width + pile.spill_left + pile.spill_right;
+        self.layers.iter().map(area).sum::<f32>()
+            + self.dormant.values().map(area).sum::<f32>()
+            + self.parking.iter().map(|(_, pile, _)| area(pile)).sum::<f32>()
+            + self.carried.values().map(|(pile, _)| area(pile)).sum::<f32>()
+            + self.play.balls.iter().map(Snowball::area).sum::<f32>()
+            + self.air.grains.iter().map(|grain| grain.area).sum::<f32>()
+            + self.air.overflow.iter().map(|(area, _)| area).sum::<f32>()
+    }
+
+    fn return_snowballs(&mut self) {
+        if self.play.balls.is_empty() {
+            return;
+        }
+        for (li, layer) in self.layers.iter_mut().enumerate() {
+            let on = if li == 0 { Surface::Ground } else { Surface::Ledge(self.ids[li]) };
+            self.play.return_to(on, layer);
+        }
+    }
+
     pub fn has_snow(&self) -> bool {
-        self.layers.iter().any(|layer| layer.top > 0.5)
+        !self.play.balls.is_empty() || self.layers.iter().any(|layer| layer.top > 0.5)
     }
 
     /// Nothing falls or waits for its window, and nothing will until snowfall is turned on: the screen can rest.
     pub fn is_empty(&self) -> bool {
         self.snowfall == Snowfall::Off
             && self.sprite_count() == 0
+            && self.play.balls.is_empty()
             && self.air.gust.is_none()
             && self.air.overflow.is_empty()
             && self.dormant.is_empty()
@@ -473,6 +527,7 @@ impl SnowSimulation {
             return;
         }
         self.layers[0].resize(column_count(width));
+        self.layers[0].right = width;
         self.width = width;
         self.height = height;
         self.air.jolt_scale = jolt_scale(height);
@@ -488,9 +543,13 @@ impl SnowSimulation {
         let wind = self.air.slide_wind;
         self.air.slide_wind = if wind.abs() < 1.0 { 0.0 } else { wind * (-dt / SLIDE_CALM).exp() };
         self.expire_parking();
-        for ledge in &mut self.layers[1..] {
-            self.air.carry(ledge, dt);
+        for (li, ledge) in self.layers.iter_mut().enumerate().skip(1) {
+            if self.air.carry(ledge, dt) {
+                self.play.break_on(Surface::Ledge(self.ids[li]), &mut self.air.overflow);
+            }
         }
+        // Follow window motion before testing whether the pointer is still pushing a ball.
+        self.advance_snowballs(0.0);
         self.track_cursor(cursor, dt);
         for (li, ledge) in self.layers.iter_mut().enumerate().skip(1) {
             self.air.confine(ledge, li, self.width, self.walls);
@@ -502,11 +561,17 @@ impl SnowSimulation {
         self.advance_grains(dt);
         self.air.advance_motes(dt);
         self.settle(dt);
+        self.advance_snowballs(dt);
 
         self.spawn_flakes();
 
         for (area, x) in self.air.overflow.drain(..) {
-            self.layers[0].deposit(area, x, true);
+            let ground = &mut self.layers[0];
+            let x = x.clamp(ground.base().x, ground.base().x + ground.width() - COLUMN_WIDTH);
+            let missed = ground.deposit(area, x, true);
+            let i = ground.clamped_index(x);
+            ground.set(i, ground.heights[i] + missed / COLUMN_WIDTH);
+            self.air.heights_changed = true;
         }
 
         for layer in &mut self.layers {
@@ -517,7 +582,9 @@ impl SnowSimulation {
         // Only a cursor that actually displaces snow needs the full rate; one passing near it or resting in it changes nothing.
         let pushed = air.clock - air.last_window_motion < 0.6 || air.clock - air.last_cursor_push < 0.3 || air.gust.is_some();
         // The steady trickle off window corners is a few tiny grains at a time; they read fine at the calm rate.
-        let flying = air.grains.len() > 24 || air.slide_wind.abs() > 20.0;
+        let flying = air.grains.len() > 24
+            || air.slide_wind.abs() > 20.0
+            || self.play.balls.iter().any(|ball| matches!(ball.state, SnowballState::Rolling { .. }));
         self.pace = if pushed {
             Pace::Interactive
         } else if flying {
@@ -528,6 +595,28 @@ impl SnowSimulation {
         let changed = was_moving || self.sprite_count() > 0 || self.air.heights_changed || self.air.windows_changed;
         self.air.windows_changed = false;
         changed
+    }
+
+    fn advance_snowballs(&mut self, dt: f32) {
+        if self.play.balls.is_empty() {
+            return;
+        }
+        for (li, layer) in self.layers.iter_mut().enumerate() {
+            let on = if li == 0 { Surface::Ground } else { Surface::Ledge(self.ids[li]) };
+            if self.play.advance(layer, on, dt, self.air.clock) {
+                self.air.heights_changed = true;
+            }
+        }
+    }
+
+    /// Ball sprites follow the airborne sprites in the same instance buffer, drawn above the Piles.
+    pub fn write_snowballs(&self, buffer: &mut [Sprite]) -> usize {
+        let mut written = 0;
+        for (slot, ball) in buffer.iter_mut().zip(&self.play.balls) {
+            *slot = Sprite { position: ball.center, size: ball.radius * 2.0, alpha: self.opacity, ball: 1.0, angle: ball.angle, ..Sprite::default() };
+            written += 1;
+        }
+        written
     }
 
     pub fn write_sprites(&self, buffer: &mut [Sprite]) -> usize {
@@ -630,6 +719,7 @@ impl SnowSimulation {
             }
         }
         if let Some(li) = self.ledge_index(id) {
+            self.play.return_to(Surface::Ledge(id), &mut self.layers[li]);
             self.ids.remove(li);
             return Some(self.layers.remove(li));
         }
@@ -656,6 +746,7 @@ impl SnowSimulation {
     /// Pile: what falls on a straddling window's other part joins the one Pile. `None` if there is little to take.
     pub fn drain_pile(&mut self, id: WindowId) -> Option<Vec<(f32, f32)>> {
         let li = self.ledge_index(id)?;
+        self.play.return_to(Surface::Ledge(id), &mut self.layers[li]);
         let ledge = &mut self.layers[li];
         if ledge.heights.iter().sum::<f32>() * ledge.column_width < 0.5 {
             return None;
@@ -788,7 +879,9 @@ impl SnowSimulation {
                 if sliding && columns == ledge.count() {
                     self.air.pan(ledge, left, top);
                 } else {
-                    self.air.move_ledge(ledge, left, right, top, columns, interval);
+                    if self.air.move_ledge(ledge, left, right, top, columns, interval) {
+                        self.play.break_on(Surface::Ledge(surface.id), &mut self.air.overflow);
+                    }
                 }
                 li
             } else {
@@ -822,6 +915,11 @@ impl SnowSimulation {
             ledge.update_visibility(self.width, &blockers);
         }
 
+        if !self.play.balls.is_empty() {
+            for &id in self.ids.iter().skip(1).filter(|id| !seen.contains(id)) {
+                self.play.break_on(Surface::Ledge(id), &mut self.air.overflow);
+            }
+        }
         let layers = std::mem::take(&mut self.layers);
         let ids = std::mem::take(&mut self.ids);
         for (li, (mut ledge, id)) in layers.into_iter().zip(ids).enumerate() {
@@ -890,11 +988,20 @@ impl SnowSimulation {
             .filter(|&li| {
                 let layer = &self.layers[li];
                 let base = layer.base();
-                low <= base.y + layer.top + 1.0
-                    && high >= base.y - layer.bed_depth
-                    && right >= base.x
-                    && left <= base.x + layer.width()
-                    && (li == 0 || layer.top > 0.01)
+                let touches_ball = self.play.balls.iter().any(|ball| {
+                    let on = if li == 0 { Surface::Ground } else { Surface::Ledge(self.ids[li]) };
+                    ball.surface() == on
+                        && low <= ball.center.y + ball.radius
+                        && high >= ball.center.y - ball.radius
+                        && right >= ball.center.x - ball.radius
+                        && left <= ball.center.x + ball.radius
+                });
+                touches_ball
+                    || (low <= base.y + layer.top + 1.0
+                        && high >= base.y - layer.bed_depth
+                        && right >= base.x
+                        && left <= base.x + layer.width()
+                        && (li == 0 || layer.top > 0.01))
             })
             .collect();
         if touched.is_empty() {
@@ -912,7 +1019,13 @@ impl SnowSimulation {
         for step in 1..=steps {
             let position = previous + delta * (step as f32 / steps as f32);
             for &li in &touched {
-                self.air.carve(&mut self.layers[li], li, position, velocity, distance / steps as f32, step == steps);
+                let on = if li == 0 { Surface::Ground } else { Surface::Ledge(self.ids[li]) };
+                if self.air.gust.is_none() && self.play.sweep(&mut self.layers[li], on, position, velocity, delta.x / steps as f32, self.air.clock) {
+                    self.air.heights_changed = true;
+                    self.air.last_cursor_push = self.air.clock;
+                } else {
+                    self.air.carve(&mut self.layers[li], li, position, velocity, distance / steps as f32, step == steps);
+                }
             }
         }
     }
@@ -1063,6 +1176,7 @@ impl SnowSimulation {
     /// Clears all the snow: a gust in `direction` lifts it off the ground and the windows and blows it off the screen,
     /// or, `calm`, it melts away where it lies.
     pub fn blow_away(&mut self, direction: f32, calm: bool) {
+        self.return_snowballs();
         let direction = if direction < 0.0 { -1.0 } else { 1.0 };
         self.air.gust = Some(Gust { start: self.air.clock, direction, calm });
         self.forget_hidden_snow();
@@ -1372,7 +1486,7 @@ impl Air {
     /// Moves a ledge's snow as a body riding on its window: it feels gravity plus the inertia of the
     /// window's acceleration, sticks by friction, slides when that's exceeded, and flies free when the
     /// window drops away faster than gravity or stops short after rising.
-    fn carry(&mut self, ledge: &mut SnowLayer, dt: f32) {
+    fn carry(&mut self, ledge: &mut SnowLayer, dt: f32) -> bool {
         let previous_velocity = ledge.track_velocity;
         smooth_damp(&mut ledge.track, &mut ledge.track_velocity, ledge.origin, TRACK_TIME, dt);
         let mut acceleration = (ledge.track_velocity - previous_velocity) / dt;
@@ -1395,7 +1509,7 @@ impl Air {
         if ledge.top <= 0.05 {
             ledge.offset = V2::ZERO;
             ledge.offset_velocity = V2::ZERO;
-            return;
+            return false;
         }
 
         let mut lift = ledge.offset.y;
@@ -1451,6 +1565,7 @@ impl Air {
             self.shed(ledge, 1.0, carried);
             ledge.offset = V2::ZERO;
             ledge.offset_velocity = V2::ZERO;
+            return true;
         } else if ledge.agitation > shakes {
             // A granular bed shaken well past gravity throws grains off its surface.
             let rate = (0.06 * (ledge.agitation - shakes)).min(0.8);
@@ -1470,6 +1585,7 @@ impl Air {
                 self.heights_changed = true;
             }
         }
+        false
     }
 
     /// The part of a window slid past a wall carries no snow: the wall scrapes it off, and it heaps up against the

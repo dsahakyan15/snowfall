@@ -67,6 +67,7 @@ pub fn build(settings: &Settings, context: &Context) -> Vec<Item> {
         Item::Separator,
         toggle(text.behind_windows, behind, Change::BehindWindows, true),
         toggle(text.keep_windows_clear, settings.keep_windows_clear, Change::KeepWindowsClear, true),
+        toggle(text.snowballs, settings.snowballs, Change::Snowballs, true),
         toggle(text.melt, settings.melt, Change::Melt, true),
         toggle(text.pause_on_battery, settings.pause_on_battery, Change::PauseOnBattery, true),
         toggle(text.show_over_full_screen, settings.show_over_full_screen, Change::ShowOverFullScreen, !behind),
@@ -185,7 +186,7 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_has_every_m1_item_in_order() {
+    fn the_menu_has_every_item_in_order() {
         let menu = build(&Settings::default(), &context(Language::English));
         assert_eq!(
             labels(&menu),
@@ -197,6 +198,7 @@ mod tests {
                 "Clear snow",
                 "Behind windows",
                 "Keep windows clear",
+                "Snowballs",
                 "Melt",
                 "Pause on battery",
                 "Show over full screen",
@@ -212,6 +214,7 @@ mod tests {
     fn the_menu_is_in_russian_for_a_russian_ui() {
         let menu = build(&Settings::default(), &context(Language::Russian));
         let labels = labels(&menu);
+        assert!(labels.contains(&"Снежки"));
         assert_eq!(labels[0], "Снегопад");
         assert_eq!(labels.last(), Some(&"Выход"));
         assert!(labels.iter().all(|label| !label.contains("Quit")));
@@ -224,6 +227,7 @@ mod tests {
         assert!(!state(find(&menu, "Heavy snow")).0);
         assert!(state(find(&menu, "None")).0);
         assert!(state(find(&menu, "100%")).0);
+        assert_eq!(state(find(&menu, "Snowballs")), (true, true));
         assert_eq!(state(find(&menu, "Melt")), (true, true));
         assert_eq!(state(find(&menu, "Open at login")), (true, true));
         assert_eq!(state(find(&menu, "Behind windows")), (false, true));
@@ -246,6 +250,14 @@ mod tests {
     #[test]
     fn choosing_an_item_asks_for_the_opposite_of_its_state() {
         let menu = build(&Settings::default(), &context(Language::English));
+        let Item::Command { action, .. } = find(&menu, "Snowballs") else { panic!() };
+        assert_eq!(action, &Action::Change(Change::Snowballs(false)));
+        let mut settings = Settings::default();
+        settings.apply(&Change::Snowballs(false));
+        let changed = build(&settings, &context(Language::English));
+        assert_eq!(state(find(&changed, "Snowballs")), (false, true));
+        let Item::Command { action, .. } = find(&changed, "Snowballs") else { panic!() };
+        assert_eq!(action, &Action::Change(Change::Snowballs(true)));
         let Item::Command { action, .. } = find(&menu, "Melt") else { panic!() };
         assert_eq!(action, &Action::Change(Change::Melt(false)));
         let Item::Command { action, .. } = find(&menu, "Behind windows") else { panic!() };

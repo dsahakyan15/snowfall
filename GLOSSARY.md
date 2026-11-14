@@ -14,6 +14,9 @@ _Avoid_: particle, snowflake sprite
 Settled snow on one surface, described by its height along that surface.
 _Avoid_: drift, layer, heap, accumulation
 
+**Snowball**:
+A ball rolled out of a deep Pile by the pointer. It grows by taking snow from the Pile and rests on a Ledge or the Ground.
+
 **Ledge**:
 The top edge of a window, which can carry a Pile.
 _Avoid_: window top, shelf, surface

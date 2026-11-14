@@ -34,8 +34,8 @@ pub struct SnowLayer {
     /// How far the snow has moved along the window since it came, as the window's left edge was dragged in or out
     /// under it: what is drawn in it moves along too.
     pub drift: f32,
-    /// The window's right edge, where the snow ends short of a whole column: which edge moved tells a resize from a
-    /// move.
+    /// The support's right edge, which need not fall on a column boundary. For a window, which edge moved tells a
+    /// resize from a move; for the Ground, balls stop here rather than on the extra drawing column.
     pub right: f32,
     pub swing_direction: V2,
     pub swing_peak: f32,
