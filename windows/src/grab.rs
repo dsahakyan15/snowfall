@@ -31,11 +31,13 @@ enum Input {
 }
 
 thread_local! {
-    static INPUT: RefCell<Vec<Input>> = const { RefCell::new(Vec::new()) };
+    static INPUT: RefCell<Vec<(Instant, Input)>> = const { RefCell::new(Vec::new()) };
 }
 
 fn enqueue(input: Input) {
-    INPUT.with_borrow_mut(|queue| queue.push(input));
+    // Keep event times: processing several queued moves in one frame must not turn an
+    // ordinary drag into an enormous release velocity.
+    INPUT.with_borrow_mut(|queue| queue.push((Instant::now(), input)));
 }
 
 /// Owns every hit window, including the capturing window while its ball crosses to another screen.
@@ -55,7 +57,7 @@ impl Grabs {
     /// Runs outside window callbacks, so moving a window can safely dispatch more messages.
     pub fn input(&mut self, screens: &mut [Screen], now: i64) {
         let input = INPUT.with_borrow_mut(std::mem::take);
-        for event in input {
+        for (at, event) in input {
             match event {
                 Input::Press(id, point) if self.held.is_none() => {
                     for screen in screens.iter_mut() {
@@ -63,7 +65,7 @@ impl Grabs {
                         if screen.simulation.grab(id, local) {
                             self.held = Some(id);
                             self.samples.clear();
-                            self.sample(point);
+                            self.sample(point, at);
                             screen.wake(now);
                             break;
                         }
@@ -74,9 +76,9 @@ impl Grabs {
                         }
                     }
                 }
-                Input::Move(point) => self.move_to(screens, point, now),
+                Input::Move(point) => self.move_to(screens, point, at, now),
                 Input::Release(point) => {
-                    self.move_to(screens, point, now);
+                    self.move_to(screens, point, at, now);
                     self.release(screens, now);
                 }
                 Input::Cancel => self.release(screens, now),
@@ -87,7 +89,7 @@ impl Grabs {
         // While dragging only, also sample the pointer so a fast move or a release outside it cannot strand the ball.
         if self.held.is_some() {
             if let Some(point) = pointer() {
-                self.move_to(screens, point, now);
+                self.move_to(screens, point, Instant::now(), now);
             }
             if unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } >= 0 {
                 self.release(screens, now);
@@ -98,21 +100,20 @@ impl Grabs {
         }
     }
 
-    fn sample(&mut self, point: V2) {
-        let now = Instant::now();
+    fn sample(&mut self, point: V2, now: Instant) {
         self.samples.push_back((now, point));
         while self.samples.len() > 1 && now.duration_since(self.samples[0].0) > Duration::from_millis(80) {
             self.samples.pop_front();
         }
     }
 
-    fn move_to(&mut self, screens: &mut [Screen], point: V2, now: i64) {
+    fn move_to(&mut self, screens: &mut [Screen], point: V2, at: Instant, now: i64) {
         let Some(id) = self.held else { return };
         let Some(from) = screens.iter().position(|screen| screen.simulation.snowballs().iter().any(|ball| ball.id == id)) else {
             self.held = None;
             return;
         };
-        self.sample(point);
+        self.sample(point, at);
         let to = screens
             .iter()
             .position(|screen| {
@@ -135,14 +136,9 @@ impl Grabs {
 
     fn release(&mut self, screens: &mut [Screen], now: i64) {
         let Some(id) = self.held.take() else { return };
-        let velocity = match (self.samples.front(), self.samples.back()) {
-            (Some((start, from)), Some((end, to))) => (*to - *from) / end.duration_since(*start).as_secs_f32().max(0.01),
-            _ => V2::ZERO,
-        };
         for screen in screens {
             if screen.simulation.snowballs().iter().any(|ball| ball.id == id) {
-                let scale = screen.scale();
-                screen.simulation.release(V2::new((velocity.x * scale.0).clamp(-1500.0, 1500.0), (-velocity.y * scale.1).clamp(-1500.0, 1500.0)));
+                screen.simulation.release(release_velocity(&self.samples, screen.scale()));
                 screen.wake(now);
                 break;
             }
@@ -202,6 +198,15 @@ impl Grabs {
         }
         self.windows.retain(|id, _| present.contains(id));
     }
+}
+
+fn release_velocity(samples: &VecDeque<(Instant, V2)>, scale: (f32, f32)) -> V2 {
+    let velocity = match (samples.front(), samples.back()) {
+        (Some((start, from)), Some((end, to))) => (*to - *from) / end.duration_since(*start).as_secs_f32().max(0.01),
+        _ => V2::ZERO,
+    };
+    // scale is engine points per physical pixel; desktop Y points down, engine Y up.
+    V2::new((velocity.x * scale.0).clamp(-1500.0, 1500.0), (-velocity.y * scale.1).clamp(-1500.0, 1500.0))
 }
 
 #[derive(Clone, PartialEq)]
@@ -419,5 +424,35 @@ unsafe extern "system" fn procedure(window: HWND, message: u32, wparam: WPARAM, 
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(window, message, wparam, lparam) },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn release_uses_the_last_80ms_in_points_with_y_up() {
+        let mut grabs = Grabs::default();
+        let start = Instant::now();
+        grabs.sample(V2::new(-1000.0, 1000.0), start);
+        grabs.sample(V2::new(0.0, 100.0), start + Duration::from_millis(40));
+        grabs.sample(V2::new(60.0, 70.0), start + Duration::from_millis(100));
+        assert_eq!(grabs.samples.len(), 2);
+        // Destination scale is 2/3 points per pixel, as on a 150% display.
+        let velocity = release_velocity(&grabs.samples, (2.0 / 3.0, 2.0 / 3.0));
+        assert!((velocity.x - 1000.0 * 2.0 / 3.0).abs() < 0.01);
+        assert!((velocity.y - 500.0 * 2.0 / 3.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn release_caps_flicks_and_a_pause_cancels_old_motion() {
+        let mut grabs = Grabs::default();
+        let start = Instant::now();
+        grabs.sample(V2::ZERO, start);
+        grabs.sample(V2::new(-1000.0, 1000.0), start + Duration::from_millis(40));
+        assert_eq!(release_velocity(&grabs.samples, (1.0, 1.0)), V2::new(-1500.0, -1500.0));
+        grabs.sample(V2::new(-1000.0, 1000.0), start + Duration::from_millis(140));
+        assert_eq!(release_velocity(&grabs.samples, (1.0, 1.0)), V2::ZERO);
     }
 }
