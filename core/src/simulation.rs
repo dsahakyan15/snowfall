@@ -24,7 +24,7 @@ const CLEAR_TIME: f32 = 1.0;
 /// Keep windows clear: the Ground keeps a layer this deep, and what lies above it melts with this time constant.
 const CLEAR_GROUND_DEPTH: f32 = 3.0;
 const CLEAR_GROUND_TIME: f32 = 2.0;
-const DEPOSITION: f32 = 1.1;
+const DEPOSITION: f32 = 2.0;
 const REPOSE: f32 = 0.8;
 const ROUNDING: f32 = 0.15;
 const CURSOR_RADIUS: f32 = 10.0;
@@ -90,8 +90,8 @@ impl Snowfall {
     fn flakes_per_megapoint(self) -> f32 {
         match self {
             Snowfall::Off => 0.0,
-            Snowfall::Snow => 380.0,
-            Snowfall::HeavySnow => 1200.0,
+            Snowfall::Snow => 180.0,
+            Snowfall::HeavySnow => 540.0,
         }
     }
 }
@@ -1780,15 +1780,15 @@ impl Air {
         let random = &mut self.random;
         let near = random.next() < 0.02;
         let depth = if near { 1.0 } else { random.next().powf(1.6) };
-        let fall_speed = if near { random.range(75.0, 100.0) } else { 16.0 + depth * 50.0 + random.range(0.0, 10.0) };
+        let fall_speed = if near { random.range(85.0, 115.0) } else { 28.0 + depth * 62.0 + random.range(0.0, 12.0) };
         Flake {
             position: V2::new(random.range(-30.0, width + 30.0), y),
             velocity: V2::new(wind * (0.35 + 0.65 * depth), -fall_speed),
             fall_speed,
-            size: if near { random.range(8.0, 13.0) } else { 1.4 + depth * 4.4 + random.range(0.0, 1.0) },
+            size: if near { random.range(8.0, 13.0) } else { 1.4 + 3.6 * depth + random.range(0.0, 0.8) },
             depth,
-            alpha: if near { 0.28 } else { 0.4 + depth * 0.5 },
-            soft: if near { 0.95 } else { 0.75 - depth * 0.45 },
+            alpha: if near { 0.28 } else { 0.75 + 0.25 * depth },
+            soft: if near { 0.95 } else { 0.35 - 0.2 * depth },
             phase: random.range(0.0, PHASE_WRAP),
             sway_rate: random.range(0.5, 1.4),
             sway_amount: if near { random.range(10.0, 20.0) } else { random.range(4.0, 9.0) + depth * 10.0 },
