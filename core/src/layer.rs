@@ -186,6 +186,22 @@ impl SnowLayer {
         self.replace(fresh);
     }
 
+    /// Stretches the snow over `columns` columns, keeping how much there is: for a window that is wider or narrower
+    /// here than where its snow came from.
+    pub fn resample(&mut self, columns: usize) {
+        let count = self.heights.len();
+        if columns == count || count == 0 || columns == 0 {
+            return;
+        }
+        let total: f32 = self.heights.iter().sum();
+        let mut fresh: Vec<f32> = (0..columns).map(|j| sample(&self.heights, (j as f32 + 0.5) * count as f32 / columns as f32 - 0.5)).collect();
+        let sum: f32 = fresh.iter().sum();
+        if sum > 0.0 {
+            fresh.iter_mut().for_each(|h| *h *= total / sum);
+        }
+        self.replace(fresh);
+    }
+
     pub fn update_visibility(&mut self, screen_width: f32, blockers: &[[f32; 4]]) {
         for i in 0..self.heights.len() {
             let x = self.center_x(i);
@@ -433,4 +449,16 @@ fn shift(h: &mut [f32], p: &mut [f32], amount: f32, from: usize, to: usize) {
     h[to] += amount;
     p[from] -= share;
     p[to] += share;
+}
+
+/// `values` read at a fractional index, between neighbours in a straight line, and held at the ends.
+pub fn sample(values: &[f32], at: f32) -> f32 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let last = values.len() - 1;
+    let at = at.clamp(0.0, last as f32);
+    let i = (at.floor() as usize).min(last);
+    let next = (i + 1).min(last);
+    values[i] + (values[next] - values[i]) * (at - i as f32)
 }

@@ -687,3 +687,123 @@ fn opacity_fades_the_falling_flakes_and_leaves_the_piles_be() {
     assert!(fading * 10 >= full.len() * 9, "only {fading} of {} sprites faded", full.len());
     assert_eq!(piles, faded_piles, "the Piles changed");
 }
+
+#[test]
+fn a_pile_carried_to_another_screen_keeps_its_snow() {
+    let none = HashSet::new();
+    let mut from = SnowSimulation::new(1280.0, 800.0, Snowfall::HeavySnow);
+    from.update_windows(&[surface(7, 300.0, 500.0, 600.0)], 0.2, &none, &none, false);
+    run(&mut from, 60.0, AWAY);
+    from.set_snowfall(Snowfall::Off);
+    run(&mut from, 40.0, AWAY);
+    let carried = on_window(&from);
+    assert!(carried > 1000.0, "the window gathered only {carried}");
+
+    let falling = from.sprite_count();
+    let pile = from.take_pile(7).expect("a Pile to carry");
+    // The window has left this screen; with its Pile gone, nothing is left to fall.
+    from.update_windows(&[], 0.2, &none, &none, false);
+    run(&mut from, 1.0, AWAY);
+    assert!(from.sprite_count() <= falling, "snow fell where the window left: {falling} → {}", from.sprite_count());
+    assert_eq!(on_window(&from), 0.0);
+
+    // On the other screen the window is a little narrower, as at another scale.
+    let mut to = SnowSimulation::new(1920.0, 1080.0, Snowfall::Off);
+    to.bring_pile(7, pile);
+    to.update_windows(&[surface(7, 100.0, 700.0, 500.0)], 0.2, &none, &none, false);
+    to.step(DT, AWAY);
+    let arrived = on_window(&to);
+    assert!((arrived - carried).abs() < carried * 0.03, "carried {carried}, arrived {arrived}");
+    run(&mut to, 2.0, AWAY);
+    assert_finite(&to);
+}
+
+#[test]
+fn a_lent_pile_is_drawn_but_not_simulated() {
+    let none = HashSet::new();
+    let mut owner = SnowSimulation::new(1280.0, 800.0, Snowfall::HeavySnow);
+    owner.update_windows(&[surface(7, 1000.0, 500.0, 600.0)], 0.2, &none, &none, false);
+    run(&mut owner, 60.0, AWAY);
+    let view = owner.view_pile(7).expect("a Pile to lend");
+
+    let mut neighbour = SnowSimulation::new(1280.0, 800.0, Snowfall::Off);
+    let columns = neighbour.column_count();
+    // The neighbouring screen starts where the owner's ends.
+    neighbour.set_borrowed(vec![view.mapped((1.0, 1.0), (-1280.0, 0.0))]);
+    assert!(neighbour.step(DT, AWAY), "the lent Pile isn't drawn");
+    assert_eq!(neighbour.column_count(), columns + 2 * view.levels.len());
+    assert!(!neighbour.is_empty());
+    let lent = piles(&neighbour).iter().find(|(origin, _)| origin.y > 100.0).map(|pile| pile.1).expect("the lent Pile drawn");
+    let kept = piles(&owner).iter().find(|(origin, _)| origin.y > 100.0).map(|pile| pile.1).unwrap();
+    assert!((lent - kept).abs() < kept * 0.01, "lent {lent}, kept {kept}");
+    neighbour.set_borrowed(Vec::new());
+    assert!(neighbour.step(DT, AWAY), "the Pile taken back isn't redrawn");
+    assert!(neighbour.is_empty());
+}
+
+#[test]
+fn a_window_across_two_screens_gathers_one_pile_along_its_whole_length() {
+    let none = HashSet::new();
+    // Two screens side by side; the window runs from 1000 on the left one to 320 on the right one.
+    let mut keeper = SnowSimulation::new(1280.0, 800.0, Snowfall::HeavySnow);
+    let mut other = SnowSimulation::new(1280.0, 800.0, Snowfall::HeavySnow);
+    keeper.thaws = false;
+    other.thaws = false;
+    keeper.update_windows(&[surface(7, 1000.0, 500.0, 600.0)], 0.2, &none, &none, false);
+    other.update_windows(&[surface(7, -280.0, 500.0, 600.0)], 0.2, &none, &none, false);
+    for _ in 0..(60.0 / DT) as usize {
+        keeper.step(DT, AWAY);
+        other.step(DT, AWAY);
+        if let Some(snow) = other.drain_pile(7) {
+            let snow: Vec<_> = snow.into_iter().map(|(x, area)| (x + 1280.0, area)).collect();
+            keeper.add_to_pile(7, &snow);
+        }
+    }
+    let view = keeper.view_pile(7).expect("the one Pile");
+    let depth = |range: std::ops::Range<f32>| -> f32 {
+        let columns: Vec<f32> = (0..view.levels.len())
+            .filter(|&i| range.contains(&(view.origin.x + (i as f32 + 0.5) * 2.0)))
+            .map(|i| view.levels[i] - view.beds[i])
+            .collect();
+        columns.iter().sum::<f32>() / columns.len() as f32
+    };
+    let (left, right) = (depth(1050.0..1250.0), depth(1310.0..1550.0));
+    assert!(left > 3.0 && right > 3.0, "the Pile is {left} deep on the left screen and {right} on the right");
+    assert!((left - right).abs() < 0.5 * left.max(right), "the Pile is {left} deep on the left screen and {right} on the right");
+    assert!(on_window(&other) < 50.0, "the other screen kept {} of its own", on_window(&other));
+}
+
+#[test]
+fn a_pile_brought_to_a_window_with_snow_of_its_own_joins_it() {
+    let none = HashSet::new();
+    let mut from = SnowSimulation::new(1280.0, 800.0, Snowfall::HeavySnow);
+    let mut to = SnowSimulation::new(1280.0, 800.0, Snowfall::HeavySnow);
+    from.thaws = false;
+    to.thaws = false;
+    from.update_windows(&[surface(7, 300.0, 500.0, 600.0)], 0.2, &none, &none, false);
+    to.update_windows(&[surface(7, 300.0, 500.0, 600.0)], 0.2, &none, &none, false);
+    run(&mut from, 30.0, AWAY);
+    run(&mut to, 30.0, AWAY);
+    from.set_snowfall(Snowfall::Off);
+    to.set_snowfall(Snowfall::Off);
+    run(&mut from, 45.0, AWAY);
+    run(&mut to, 45.0, AWAY);
+    let (a, b) = (on_window(&from), on_window(&to));
+    to.bring_pile(7, from.take_pile(7).unwrap());
+    to.step(DT, AWAY);
+    let joined = on_window(&to);
+    assert!((joined - (a + b)).abs() < (a + b) * 0.03, "{a} and {b} joined into {joined}");
+}
+
+#[test]
+fn a_pile_carried_for_a_window_that_never_arrives_is_let_go() {
+    let none = HashSet::new();
+    let mut from = SnowSimulation::new(1280.0, 800.0, Snowfall::HeavySnow);
+    from.update_windows(&[surface(7, 300.0, 500.0, 600.0)], 0.2, &none, &none, false);
+    run(&mut from, 20.0, AWAY);
+    let mut to = SnowSimulation::new(1280.0, 800.0, Snowfall::Off);
+    to.bring_pile(7, from.take_pile(7).unwrap());
+    assert!(!to.is_empty(), "the carried Pile waits for its window");
+    run(&mut to, 3.0, AWAY);
+    assert!(to.is_empty(), "the carried Pile is still kept with no window for it");
+}
