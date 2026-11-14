@@ -95,8 +95,8 @@ struct App {
     away: bool,
     /// The page of a newer release the last notification told of, opened when it is clicked.
     release_page: Option<String>,
-    /// A look for updates is under way.
-    checking: bool,
+    /// A look for updates is under way, and whether it was asked for from the menu.
+    checking: Option<bool>,
 }
 
 thread_local! {
@@ -138,7 +138,7 @@ pub fn run() -> Result<()> {
         add_tray_icon(window, icon);
         if first_run {
             log!("first run");
-            notify(window, Language::from_langid(GetUserDefaultUILanguage()).strings().first_run);
+            notify(window, Language::from_langid(GetUserDefaultUILanguage()).strings().first_run, None);
         }
         let _ = WTSRegisterSessionNotification(window, NOTIFY_FOR_THIS_SESSION);
         let _ = RegisterPowerSettingNotification(HANDLE(window.0), &GUID_CONSOLE_DISPLAY_STATE, DEVICE_NOTIFY_WINDOW_HANDLE);
@@ -154,10 +154,11 @@ pub fn run() -> Result<()> {
             display_off: false,
             away: false,
             release_page: None,
-            checking: false,
+            checking: None,
         }));
-        // The first look for updates waits a little after start-up, then the hourly timer decides when one is due.
-        SetTimer(Some(window), TIMER_UPDATES, 30_000, None);
+        // The first look for updates waits a little after start-up, and on the first run an hour, so its news doesn't
+        // cover the first-run notification; then the hourly timer decides when one is due.
+        SetTimer(Some(window), TIMER_UPDATES, if first_run { 60 * 60 * 1000 } else { 30_000 }, None);
 
         let mut message = MSG::default();
         while GetMessageW(&mut message, None, 0, 0).as_bool() {
@@ -193,7 +194,7 @@ unsafe extern "system" fn procedure(window: HWND, message: u32, wparam: WPARAM, 
         }
         WM_UPDATES => {
             let lookup = unsafe { Box::from_raw(lparam.0 as *mut Lookup) };
-            finish_update_check(window, *lookup, wparam.0 != 0);
+            finish_update_check(window, *lookup);
             LRESULT(0)
         }
         WM_WTSSESSION_CHANGE => {
@@ -458,8 +459,9 @@ fn menu_screens() -> Vec<menu::Screen> {
         .collect()
 }
 
-/// A notification from the tray icon, as Windows shows it: a toast on Windows 10 and 11.
-fn notify(window: HWND, text: &str) {
+/// A notification from the tray icon, as Windows shows it: a toast on Windows 10 and 11. Clicking it opens `page`, if
+/// any. Returns whether Windows took it, as it can't before the taskbar is up.
+fn notify(window: HWND, text: &str, page: Option<String>) -> bool {
     let mut data = NOTIFYICONDATAW {
         cbSize: size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: window,
@@ -475,74 +477,87 @@ fn notify(window: HWND, text: &str) {
     for (slot, unit) in data.szInfo.iter_mut().take(255).zip(text.encode_utf16()) {
         *slot = unit;
     }
-    unsafe {
-        let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
-    }
+    // A click belongs to the notification shown last.
+    APP.with_borrow_mut(|app| {
+        if let Some(app) = app {
+            app.release_page = page;
+        }
+    });
+    unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) }.as_bool()
 }
 
 /// What a look for updates found.
 enum Lookup {
-    /// Offline, or GitHub didn't answer: nothing is said, and the next look is soon.
+    /// Offline, or GitHub didn't answer: the next look is soon.
     Failed,
     UpToDate,
     Newer(releases::Release),
 }
 
-/// Looks on GitHub for a newer release on a thread of its own; the answer comes back as `WM_UPDATES`.
+/// Looks on GitHub for a newer release on a thread of its own; the answer comes back as `WM_UPDATES`. Asked for from
+/// the menu while a look is under way, that look's answer is shown as the one asked for.
 fn check_for_updates(window: HWND, manual: bool) {
     let started = APP.with_borrow_mut(|app| match app {
-        Some(app) if !app.checking => {
-            app.checking = true;
-            true
-        }
-        _ => false,
+        Some(app) => match app.checking {
+            Some(asked) => {
+                app.checking = Some(asked || manual);
+                false
+            }
+            None => {
+                app.checking = Some(manual);
+                true
+            }
+        },
+        None => false,
     });
     if !started {
         return;
     }
     let target = window.0 as isize;
-    let _ = thread::Builder::new().name("updates".into()).spawn(move || {
+    let spawned = thread::Builder::new().name("updates".into()).spawn(move || {
         let lookup = match releases::fetch() {
             None => Lookup::Failed,
             Some(answer) => releases::newer(&answer, env!("CARGO_PKG_VERSION")).map_or(Lookup::UpToDate, Lookup::Newer),
         };
         let lookup = Box::into_raw(Box::new(lookup));
         unsafe {
-            if PostMessageW(Some(HWND(target as _)), WM_UPDATES, WPARAM(manual as usize), LPARAM(lookup as isize)).is_err() {
+            if PostMessageW(Some(HWND(target as _)), WM_UPDATES, WPARAM(0), LPARAM(lookup as isize)).is_err() {
                 drop(Box::from_raw(lookup));
             }
         }
     });
+    if spawned.is_err() {
+        finish_update_check(window, Lookup::Failed);
+    }
 }
 
-fn finish_update_check(window: HWND, lookup: Lookup, manual: bool) {
+fn finish_update_check(window: HWND, lookup: Lookup) {
+    let manual = APP.with_borrow_mut(|app| app.as_mut().and_then(|app| app.checking.take())).unwrap_or(false);
     let strings = Language::from_langid(unsafe { GetUserDefaultUILanguage() }).strings();
-    if !matches!(lookup, Lookup::Failed) {
-        Registry.set_number("lastUpdateCheck", unix_now() as u32);
-    }
-    match lookup {
-        Lookup::Failed => log!("update check failed"),
+    // A look counts once it got an answer the person was told of, if there was news.
+    let answered = match lookup {
+        Lookup::Failed => {
+            log!("update check failed");
+            if manual {
+                notify(window, strings.update_failed, None);
+            }
+            false
+        }
         Lookup::UpToDate => {
             log!("up to date");
             if manual {
-                notify(window, strings.up_to_date);
+                notify(window, strings.up_to_date, None);
             }
+            true
         }
         Lookup::Newer(release) => {
             log!("update available: {}", release.version);
-            notify(window, &strings.update_available.replace("{version}", &release.version));
-            APP.with_borrow_mut(|app| {
-                if let Some(app) = app {
-                    app.release_page = Some(release.url);
-                }
-            });
+            notify(window, &strings.update_available.replace("{version}", &release.version), Some(release.url))
         }
+    };
+    if answered {
+        Registry.set_number("lastUpdateCheck", unix_now() as u32);
     }
-    APP.with_borrow_mut(|app| {
-        if let Some(app) = app {
-            app.checking = false;
-        }
-    });
 }
 
 /// Opens the page of the release the notification told of, in the browser.

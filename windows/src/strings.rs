@@ -56,6 +56,8 @@ pub struct Strings {
     pub update_available: &'static str,
     /// After a check from the menu found nothing newer.
     pub up_to_date: &'static str,
+    /// After a check from the menu couldn't reach GitHub.
+    pub update_failed: &'static str,
 }
 
 pub const ENGLISH: Strings = Strings {
@@ -87,6 +89,7 @@ pub const ENGLISH: Strings = Strings {
     first_run: "Snowfall is running — settings are in the snowflake icon.",
     update_available: "Snowfall {version} is available. Click to download it.",
     up_to_date: "You have the latest Snowfall.",
+    update_failed: "Couldn't reach GitHub to check for updates.",
 };
 
 pub const RUSSIAN: Strings = Strings {
@@ -118,6 +121,7 @@ pub const RUSSIAN: Strings = Strings {
     first_run: "Snowfall запущен — настройки в значке снежинки.",
     update_available: "Доступен Snowfall {version}. Нажмите, чтобы скачать.",
     up_to_date: "У вас последняя версия Snowfall.",
+    update_failed: "Не удалось связаться с GitHub, чтобы проверить обновления.",
 };
 
 #[cfg(test)]

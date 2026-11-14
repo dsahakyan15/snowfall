@@ -92,27 +92,114 @@ pub fn newer(answer: &str, current: &str) -> Option<Release> {
     Some(Release { version: tag.trim_start_matches(['v', 'V']).to_owned(), url })
 }
 
-/// A top-level string field of a JSON object, read without a full parser: GitHub's release answer puts `tag_name` and
-/// `html_url` at the top level before any nested object that could hold the same names.
+/// A string field at the top level of a JSON object. Nested objects, such as a release's `author` with its own
+/// `html_url`, and text inside other strings are stepped over, never read as fields.
 fn string_field(json: &str, name: &str) -> Option<String> {
-    let key = format!("\"{name}\"");
-    let rest = &json[json.find(&key)? + key.len()..];
-    let rest = rest.trim_start().strip_prefix(':')?.trim_start().strip_prefix('"')?;
+    let mut chars = json.chars().peekable();
+    skip_space(&mut chars);
+    if chars.next()? != '{' {
+        return None;
+    }
+    loop {
+        skip_space(&mut chars);
+        if chars.next_if_eq(&'}').is_some() {
+            return None;
+        }
+        if chars.next()? != '"' {
+            return None;
+        }
+        let key = read_string(&mut chars)?;
+        skip_space(&mut chars);
+        if chars.next()? != ':' {
+            return None;
+        }
+        skip_space(&mut chars);
+        if chars.peek() == Some(&'"') {
+            chars.next();
+            let value = read_string(&mut chars)?;
+            if key == name {
+                return Some(value);
+            }
+        } else {
+            skip_value(&mut chars)?;
+        }
+        skip_space(&mut chars);
+        if chars.next_if_eq(&',').is_none() {
+            return None;
+        }
+    }
+}
+
+type Chars<'a> = std::iter::Peekable<std::str::Chars<'a>>;
+
+fn skip_space(chars: &mut Chars) {
+    while chars.next_if(|c| c.is_whitespace()).is_some() {}
+}
+
+/// The rest of a string whose opening quote has been read, unescaped.
+fn read_string(chars: &mut Chars) -> Option<String> {
     let mut value = String::new();
-    let mut chars = rest.chars();
     loop {
         match chars.next()? {
             '"' => return Some(value),
             '\\' => match chars.next()? {
                 'u' => {
-                    let code: String = chars.by_ref().take(4).collect();
-                    value.push(char::from_u32(u32::from_str_radix(&code, 16).ok()?)?);
+                    let mut code = hex4(chars)?;
+                    // A character beyond the first plane comes as two escapes, a surrogate pair.
+                    if (0xD800..0xDC00).contains(&code) {
+                        if chars.next()? != '\\' || chars.next()? != 'u' {
+                            return None;
+                        }
+                        let low = hex4(chars)?;
+                        code = 0x10000 + ((code - 0xD800) << 10) + low.checked_sub(0xDC00).filter(|low| *low < 0x400)?;
+                    }
+                    value.push(char::from_u32(code)?);
                 }
+                'b' => value.push('\u{8}'),
+                'f' => value.push('\u{c}'),
                 'n' => value.push('\n'),
+                'r' => value.push('\r'),
                 't' => value.push('\t'),
-                other => value.push(other),
+                c @ ('"' | '\\' | '/') => value.push(c),
+                _ => return None,
             },
             c => value.push(c),
+        }
+    }
+}
+
+fn hex4(chars: &mut Chars) -> Option<u32> {
+    let code: String = chars.by_ref().take(4).collect();
+    if code.len() != 4 {
+        return None;
+    }
+    u32::from_str_radix(&code, 16).ok()
+}
+
+/// Steps over a value other than a string: a number, `true`, `false`, `null`, or a whole object or array.
+fn skip_value(chars: &mut Chars) -> Option<()> {
+    let mut depth = 0usize;
+    loop {
+        match *chars.peek()? {
+            '"' => {
+                chars.next();
+                read_string(chars)?;
+            }
+            '{' | '[' => {
+                chars.next();
+                depth += 1;
+            }
+            '}' | ']' if depth > 0 => {
+                chars.next();
+                depth -= 1;
+            }
+            ',' | '}' | ']' if depth == 0 => return Some(()),
+            _ => {
+                chars.next();
+            }
+        }
+        if depth == 0 && matches!(chars.peek(), Some(',' | '}')) {
+            return Some(());
         }
     }
 }
@@ -229,7 +316,14 @@ mod tests {
 
     #[test]
     fn json_strings_are_unescaped() {
-        assert_eq!(string_field(r#"{"name": "a \"b\" Г©\\"}"#, "name").as_deref(), Some("a \"b\" Г©\\"));
+        // Escapes are spelled out at run time: `b` is a backslash.
+        let b = char::from(92u8);
+        let json = format!(r#"{{"name": "a {b}"b{b}" {b}u00e9{b}{b} {b}ud83d{b}ude80 {b}/{b}r"}}"#);
+        assert_eq!(
+            string_field(&json, "name"),
+            Some(format!("a \"b\" {}{b} {} /\r", char::from_u32(0xe9).unwrap(), char::from_u32(0x1f680).unwrap()))
+        );
+        assert_eq!(string_field(&format!(r#"{{"name": "{b}ud83d"}}"#), "name"), None, "half a surrogate pair");
     }
 
     #[test]
@@ -238,5 +332,13 @@ mod tests {
         assert!(!due(Some(1_000), 1_000 + INTERVAL - 1));
         assert!(due(Some(1_000), 1_000 + INTERVAL));
         assert!(due(Some(5_000), 1_000), "a clock set back");
+    }
+
+    #[test]
+    fn only_top_level_fields_are_read() {
+        let answer = r#"{"author": {"html_url": "https://github.com/someone", "tag_name": "v99.0.0"}, "body": "\"tag_name\": \"v98\"", "assets": [{"x": [1, {"y": null}]}], "html_url": "https://github.com/o/r/releases/tag/v1.0.0", "tag_name": "v1.0.0", "prerelease": false}"#;
+        assert_eq!(string_field(answer, "html_url").as_deref(), Some("https://github.com/o/r/releases/tag/v1.0.0"));
+        assert_eq!(string_field(answer, "tag_name").as_deref(), Some("v1.0.0"));
+        assert_eq!(string_field(answer, "missing"), None);
     }
 }

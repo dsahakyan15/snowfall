@@ -3,8 +3,6 @@
 use crate::settings::{Change, Level, Opacity, Settings, Wind};
 use crate::strings::{Language, Strings};
 
-/// Features whose engine side hasn't landed yet show in the menu greyed out.
-
 /// What choosing a menu item does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
