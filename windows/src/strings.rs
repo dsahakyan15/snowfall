@@ -50,6 +50,8 @@ pub struct Strings {
     /// "Snowfall {version}: check for updates".
     pub check_for_updates: &'static str,
     pub quit: &'static str,
+    /// Shown once, on the very first run.
+    pub first_run: &'static str,
 }
 
 pub const ENGLISH: Strings = Strings {
@@ -78,6 +80,7 @@ pub const ENGLISH: Strings = Strings {
     open_at_login: "Open at login",
     check_for_updates: "Snowfall {version}: check for updates",
     quit: "Quit",
+    first_run: "Snowfall is running — settings are in the snowflake icon.",
 };
 
 pub const RUSSIAN: Strings = Strings {
@@ -106,6 +109,7 @@ pub const RUSSIAN: Strings = Strings {
     open_at_login: "Запускать при входе",
     check_for_updates: "Snowfall {version}: проверить обновления",
     quit: "Выход",
+    first_run: "Snowfall запущен — настройки в значке снежинки.",
 };
 
 #[cfg(test)]
