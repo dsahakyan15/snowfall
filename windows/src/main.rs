@@ -13,6 +13,7 @@ mod settings;
 mod snow;
 mod strings;
 mod tracker;
+mod update;
 
 use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
 use windows::Win32::System::Threading::CreateMutexW;

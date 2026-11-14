@@ -3,9 +3,6 @@
 use crate::settings::{Change, Level, Opacity, Settings, Wind};
 use crate::strings::{Language, Strings};
 
-/// Features whose engine side hasn't landed yet show in the menu greyed out.
-const UPDATES_READY: bool = false;
-
 /// What choosing a menu item does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -87,7 +84,7 @@ pub fn build(settings: &Settings, context: &Context) -> Vec<Item> {
         },
         Item::Separator,
         toggle(text.open_at_login, settings.open_at_login, Change::OpenAtLogin, true),
-        command(&text.check_for_updates.replace("{version}", context.version), Action::CheckForUpdates, UPDATES_READY),
+        command(&text.check_for_updates.replace("{version}", context.version), Action::CheckForUpdates, true),
         command(text.quit, Action::Quit, true),
     ]
 }
