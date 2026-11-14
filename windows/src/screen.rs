@@ -503,6 +503,27 @@ impl Screen {
         self.backdrop = backdrop;
     }
 
+    /// The windows on this display that can carry snow, as this screen's snow sees them.
+    pub fn surfaces(&self, tracker: &Tracker) -> Vec<WindowSurface> {
+        tracker.surfaces(&self.monitor.rect, self.size)
+    }
+
+    /// Snow coordinates per physical pixel, across and up.
+    pub fn scale(&self) -> (f32, f32) {
+        let rect = &self.monitor.rect;
+        (self.size.0 as f32 / (rect.right - rect.left).max(1) as f32, self.size.1 as f32 / (rect.bottom - rect.top).max(1) as f32)
+    }
+
+    /// How to turn this screen's snow coordinates into `other`'s: a scale and an offset for each axis. Snow
+    /// coordinates run up from the bottom of the work area.
+    pub fn mapping_to(&self, other: &Screen) -> ((f32, f32), (f32, f32)) {
+        let (from, to) = (self.scale(), other.scale());
+        let scale = (to.0 / from.0, to.1 / from.1);
+        let offset =
+            ((self.monitor.rect.left - other.monitor.rect.left) as f32 * to.0, (other.monitor.rect.bottom - self.monitor.rect.bottom) as f32 * to.1);
+        (scale, offset)
+    }
+
     pub fn wake(&mut self, now: i64) {
         self.next_due = self.next_due.min(now);
     }
