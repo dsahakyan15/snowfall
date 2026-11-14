@@ -49,8 +49,8 @@ struct SpriteOut {
 SpriteOut spriteVertex(SpriteIn s) {
     float2 corner = float2(float(s.vid & 1), float(s.vid >> 1));
     float pixels = s.size * scale;
-    // About a 1/55 s exposure, capped so even the fastest grain stays a short smear and never reads as rain.
-    float2 travel = s.velocity * 0.018;
+    // About a 1/125 s exposure, capped so even the fastest grain stays a short smear and never reads as rain.
+    float2 travel = s.velocity * 0.008;
     float smear = min(length(travel), s.size * (s.lump > 0.0 ? 1.2 : 2.2));
     float2 streak = smear > 0.25 ? normalize(travel) * smear * scale : float2(0.0, 0.0);
     // A lump's ragged edge reaches past its nominal size.
@@ -86,12 +86,12 @@ float4 spriteFragment(SpriteOut i) : SV_Target {
         shading = saturate(dot(d / max(i.radius, 0.001), float2(0.45, -0.6))) * 0.4;
     }
     // Brighter at the head, where the flake is now, than at the tail, where it was.
-    float head = span > 0.0 ? 0.15 + 0.85 * pow(t * 0.5 + 0.5, 1.5) : 1.0;
+    float head = span > 0.0 ? 0.6 + 0.4 * pow(t * 0.5 + 0.5, 1.5) : 1.0;
     float a = (1.0 - smoothstep(lerp(0.6, 0.0, i.soft), 1.0, r)) * i.alpha * head;
     if (a < 0.002) discard;
     float3 core = float3(0.965, 0.975, 0.995);
     float3 edge = float3(0.62, 0.67, 0.77);
-    float3 color = lerp(core, edge, saturate(smoothstep(0.35, 1.0, r) * 0.65 + shading));
+    float3 color = lerp(core, edge, saturate(smoothstep(0.55, 1.0, r) * 0.4 + shading));
     color = lerp(color, i.tint.rgb, i.tint.a) * light.rgb;
     return float4(color * a, a);
 }

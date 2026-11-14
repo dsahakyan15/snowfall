@@ -145,14 +145,35 @@ fn a_gust_blows_all_the_snow_away() {
     run(&mut simulation, 1.5, AWAY);
     assert!(!simulation.has_snow(), "drifts left: {:?}", piles(&simulation));
     run(&mut simulation, 3.0, AWAY);
-    // The new snowfall starts above the screen and hasn't reached the ground yet.
-    assert!(!simulation.has_snow());
+    // Fresh flakes can already reach the Ledge, only 200 points below the screen top, but not the Ground.
+    assert!(piles(&simulation).iter().all(|(origin, _)| origin.y > 0.0), "snow returned to the Ground");
     let mut sprites = vec![Sprite::default(); 20_000];
     let count = simulation.write_sprites(&mut sprites);
     assert!(sprites[..count].iter().all(|sprite| sprite.position.y > 400.0), "snow left in the lower half");
     run(&mut simulation, 60.0, AWAY);
     assert!(simulation.has_snow(), "the snowfall didn't come back");
     assert_finite(&simulation);
+}
+
+#[test]
+fn a_gust_clears_old_snow_without_any_settling_back() {
+    let none = HashSet::new();
+    let window = [surface(7, 300.0, 600.0, 500.0)];
+    for direction in [-1.0, 1.0] {
+        let mut simulation = SnowSimulation::new(1280.0, 800.0, Snowfall::HeavySnow);
+        simulation.update_windows(&window, 0.2, &none, &none, false);
+        run(&mut simulation, 90.0, AWAY);
+        assert_eq!(piles(&simulation).len(), 2);
+
+        // Disable new snowfall so neither Pile can be rebuilt by fresh flakes after the gust.
+        simulation.set_snowfall(Snowfall::Off);
+        simulation.blow_away(direction, false);
+        run(&mut simulation, 1.5, AWAY);
+        assert!(!simulation.has_snow(), "Piles left after gust {direction}: {:?}", piles(&simulation));
+        run(&mut simulation, 3.0, AWAY);
+        assert!(simulation.is_empty(), "old snow left after gust {direction}: {:?}", piles(&simulation));
+        assert_finite(&simulation);
+    }
 }
 
 #[test]
