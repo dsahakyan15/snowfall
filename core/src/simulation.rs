@@ -135,7 +135,7 @@ pub enum Pace {
     Calm,
     /// Loose snow in flight.
     Lively,
-    /// The cursor or a window is pushing snow around: drawn as often as the display allows.
+    /// The cursor, a window, or a Held/flying Snowball: drawn as often as the display allows.
     Interactive,
 }
 
@@ -255,6 +255,8 @@ struct Grain {
     lump: f32,
     /// Powder carried off by a gust: it rides the wind off the screen instead of settling.
     blown: bool,
+    /// A broken Snowball's radius: its grains return to a broad patch of Ground if otherwise lost.
+    keep: Option<f32>,
 }
 
 /// Powder thrown up by a lump bursting: it billows, slows in the air and fades without settling.
@@ -310,7 +312,7 @@ struct Air {
     windows_changed: bool,
     last_window_motion: f64,
     last_cursor_push: f64,
-    /// Snow released while the air is full, laid straight onto the ground at the end of the step.
+    /// Snow released while the air is full, or returned from Held/Falling Snowballs, laid onto the Ground at the end of the step.
     overflow: Vec<(f32, f32)>,
     gust: Option<Gust>,
     slide_wind: f32,
@@ -404,6 +406,11 @@ impl SnowSimulation {
 
     pub fn width(&self) -> f32 {
         self.width
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_random(&mut self, seed: u64) {
+        self.air.random = Random(seed.max(1));
     }
 
     pub fn height(&self) -> f32 {
@@ -635,7 +642,10 @@ impl SnowSimulation {
         }
         let air = &self.air;
         // Only a cursor that actually displaces snow needs the full rate; one passing near it or resting in it changes nothing.
-        let pushed = air.clock - air.last_window_motion < 0.6 || air.clock - air.last_cursor_push < 0.3 || air.gust.is_some();
+        let pushed = air.clock - air.last_window_motion < 0.6
+            || air.clock - air.last_cursor_push < 0.3
+            || air.gust.is_some()
+            || self.play.balls.iter().any(|ball| matches!(ball.state, SnowballState::Held | SnowballState::Falling));
         // The steady trickle off window corners is a few tiny grains at a time; they read fine at the calm rate.
         let flying = air.grains.len() > 24
             || air.slide_wind.abs() > 20.0
@@ -662,7 +672,11 @@ impl SnowSimulation {
                 self.air.heights_changed = true;
             }
         }
-        if dt > 0.0 && self.play.fall(&self.layers, &self.ids, self.width, dt, GRAVITY) {
+        if dt > 0.0 && self.play.balls.iter().any(|ball| matches!(ball.state, SnowballState::Held | SnowballState::Falling)) {
+            let broken = self.play.fly(&self.layers, &self.ids, self.width, dt, GRAVITY, self.air.wind_speed());
+            for ball in broken {
+                self.air.break_snowball(&ball, &mut self.layers, self.width);
+            }
             self.air.heights_changed = true;
         }
     }
@@ -1177,6 +1191,10 @@ impl SnowSimulation {
             grain.position += grain.velocity * dt;
 
             if grain.position.x < -10.0 || grain.position.x > self.width + 10.0 || grain.position.y < -10.0 {
+                if let Some(radius) = grain.keep {
+                    deposit_snowball(&mut self.layers[0], grain.area, grain.position.x, radius * 3.0, self.width);
+                    self.air.heights_changed = true;
+                }
                 self.air.grains.swap_remove(i);
             } else if !grain.blown
                 && grain.velocity.y <= 0.0
@@ -1187,7 +1205,13 @@ impl SnowSimulation {
                     self.air.burst(&grain, layer);
                 } else {
                     let missed = layer.deposit(grain.area, grain.position.x, true);
-                    self.air.drop_past(layer, missed, grain.position.x, grain.velocity.x * 0.5);
+                    if let Some(radius) = grain.keep {
+                        // Even tiny misses and closed edges must preserve a Snowball's area,
+                        // spread inward by the source ball's size rather than heaped in one column.
+                        deposit_snowball(&mut self.layers[0], missed, grain.position.x, radius * 3.0, self.width);
+                    } else {
+                        self.air.drop_past(layer, missed, grain.position.x, grain.velocity.x * 0.5);
+                    }
                 }
                 self.air.heights_changed = true;
                 self.air.grains.swap_remove(i);
@@ -1459,6 +1483,30 @@ impl SnowSimulation {
 }
 
 impl Air {
+    /// Most snow makes a low mound under the impact; the rest flies as a broad, visible burst.
+    /// A full grain budget simply leaves more in the mound, preserving every point of area.
+    fn break_snowball(&mut self, ball: &Snowball, layers: &mut [SnowLayer], width: f32) {
+        let desired = ((ball.area() * 0.35 / 12.0).ceil() as usize).clamp(12, 96);
+        let count = desired.min(MAX_GRAINS.saturating_sub(self.grains.len()));
+        let airborne = ball.area() * 0.35 * (count as f32 / desired as f32);
+        let li = landing(layers, ball.center.x, ball.center.y, f32::NEG_INFINITY).map_or(0, |(li, _)| li);
+        deposit_snowball(&mut layers[li], ball.area() - airborne, ball.center.x, ball.radius * 4.0, width);
+        let share = airborne / count.max(1) as f32;
+        for i in 0..count {
+            let angle = TAU * i as f32 / count as f32;
+            let radial = V2::new(angle.cos(), angle.sin());
+            self.grains.push(Grain {
+                position: ball.center + V2::new(radial.x * ball.radius * 2.5, radial.y * ball.radius * 0.65),
+                velocity: ball.velocity * 0.25 + radial * self.random.range(100.0, 260.0),
+                area: if i + 1 == count { airborne - share * i as f32 } else { share },
+                size: (share.sqrt() * 1.05).clamp(1.1, 8.0),
+                lump: 0.0,
+                blown: false,
+                keep: Some(ball.radius),
+            });
+        }
+    }
+
     /// Carries snow along with a window that the whole desktop is sliding past: nothing pushes the snow, so it doesn't react.
     fn pan(&mut self, ledge: &mut SnowLayer, left: f32, top: f32) {
         let shift = V2::new(left, top) - ledge.origin;
@@ -1757,6 +1805,7 @@ impl Air {
                 size: (share.sqrt() * 1.05).min(11.0),
                 lump: random.range(0.05, 1.0),
                 blown: false,
+                keep: None,
             });
         }
     }
@@ -1813,6 +1862,7 @@ impl Air {
                 size: (share.sqrt() * 1.05).clamp(1.1, 5.0),
                 lump: 0.0,
                 blown: false,
+                keep: None,
             });
         }
     }
@@ -1923,6 +1973,7 @@ impl Air {
                 size: (share.sqrt() * 1.05).clamp(1.1, 4.2),
                 lump: 0.0,
                 blown: false,
+                keep: None,
             });
         }
         area
@@ -2018,6 +2069,7 @@ impl Air {
             size: random.range(1.1, 2.6),
             lump: 0.0,
             blown: true,
+            keep: None,
         });
         if random.next() >= 0.35 || self.motes.len() >= MAX_MOTES {
             return;
@@ -2047,6 +2099,7 @@ impl Air {
             size: random.range(1.1, 2.4),
             lump: 0.0,
             blown: false,
+            keep: None,
         });
         if random.next() >= 0.3 || self.motes.len() >= MAX_MOTES {
             return true;
@@ -2099,6 +2152,33 @@ fn restore(ledge: &mut SnowLayer, left: f32, top: f32, columns: usize) {
     ledge.offset_velocity = V2::ZERO;
     ledge.previous_base_y = top;
     ledge.moved_at = -1.0;
+}
+
+/// Lays a Snowball's area as a raised cosine, renormalized after clipping to the screen and
+/// supporting Pile. At an edge the remaining half still reaches several ball radii inward.
+/// The Pile's ordinary repose and rounding then settle it along with the surrounding snow.
+fn deposit_snowball(layer: &mut SnowLayer, area: f32, x: f32, reach: f32, width: f32) {
+    if area <= 0.0 {
+        return;
+    }
+    let x = x.clamp(0.0, width);
+    let reach = reach.max(layer.column_width);
+    let base_x = layer.base().x;
+    let column_width = layer.column_width;
+    let left = base_x.max(0.0).max(x - reach);
+    let right = (base_x + layer.width()).min(width).min(x + reach);
+    let first = layer.clamped_index(left);
+    let last = layer.clamped_index(right);
+    // Weight the part of each column inside the clipped footprint, including partial columns.
+    let weight = |i: usize| {
+        let a = (base_x + i as f32 * column_width).max(left);
+        let b = (base_x + (i + 1) as f32 * column_width).min(right);
+        (b - a).max(0.0) * (1.0 + (PI * ((a + b) * 0.5 - x) / reach).cos())
+    };
+    let total: f32 = (first..=last).map(weight).sum();
+    for i in first..=last {
+        layer.set(i, layer.heights[i] + area * weight(i) / (total * column_width));
+    }
 }
 
 /// The highest visible snow surface crossed while falling from `from` to `to` at `x`, allowing for the surface moving meanwhile.

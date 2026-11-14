@@ -15,6 +15,13 @@ const MAX_BALLS: usize = 12;
 /// One long sweep rolls one or two balls, not a row of them.
 const COOLDOWN: f64 = 2.5;
 const FRICTION: f32 = 500.0;
+/// Packed balls withstand a short drop (up to about 160 points at the engine's gravity).
+const HARD_LANDING: f32 = 900.0;
+const HARD_HIT: f32 = 350.0;
+const EDGE_BOUNCE: f32 = 0.2;
+/// Compare loose grains' 0.8 drag toward half the wind speed. A compact ball catches less air,
+/// and its drag per unit mass falls with radius. There is no velocity damping in free flight.
+const WIND_PUSH: f32 = 0.2;
 
 /// Shared by screens so a ball keeps its identity when carried between simulations.
 static NEXT_ID: AtomicU32 = AtomicU32::new(1);
@@ -29,9 +36,14 @@ pub enum Surface {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SnowballState {
-    Rolling { on: Surface },
-    Resting { on: Surface },
+    Rolling {
+        on: Surface,
+    },
+    Resting {
+        on: Surface,
+    },
     Held,
+    /// Free flight, including a throw, a drop, or snow shed from a Ledge.
     Falling,
 }
 
@@ -42,7 +54,7 @@ pub struct Snowball {
     pub radius: f32,
     pub velocity: V2,
     pub state: SnowballState,
-    /// Turns by the distance rolled divided by the radius, in radians.
+    /// Turns by horizontal distance divided by the radius, rolling or in free flight, in radians.
     pub angle: f32,
     support_origin: V2,
     pushed_at: f64,
@@ -187,51 +199,134 @@ impl SnowPlay {
     pub fn release(&mut self, velocity: V2) {
         for ball in self.balls.iter_mut().filter(|ball| ball.state == SnowballState::Held) {
             ball.state = SnowballState::Falling;
-            ball.velocity = velocity;
+            ball.velocity = release_velocity(velocity);
         }
     }
 
-    /// Falling uses the ball's underside, catches the first visible surface and always stops at the Ground.
-    pub fn fall(&mut self, layers: &[SnowLayer], ids: &[WindowId], width: f32, dt: f32, gravity: f32) -> bool {
-        let mut active = false;
-        for ball in &mut self.balls {
-            if ball.state == SnowballState::Held {
-                active = true;
+    /// Integrates ballistic flight exactly for each small step. Short steps keep fast, small balls
+    /// from tunnelling through circle targets, independently of the display's refresh rate.
+    /// Side edges rebound with most horizontal speed lost; the top is open so throws return.
+    /// Returns broken balls for Air to turn into grains, keeping physics separate from rendering.
+    pub fn fly(&mut self, layers: &[SnowLayer], ids: &[WindowId], width: f32, dt: f32, gravity: f32, wind: f32) -> Vec<Snowball> {
+        let mut broken = Vec::new();
+        if dt <= 0.0 || !self.balls.iter().any(|b| b.state == SnowballState::Falling) {
+            return broken;
+        }
+        let radius = self.balls.iter().map(|b| b.radius).fold(START_RADIUS, f32::min).max(0.5);
+        let speed = self.balls.iter().map(|b| b.velocity.length()).fold(0.0, f32::max) + (gravity + wind.abs()) * dt;
+        let steps = (dt / (radius / (2.0 * speed.max(1.0))).min(1.0 / 240.0)).ceil().max(1.0) as usize;
+        let step = dt / steps as f32;
+        let mut gone = vec![false; self.balls.len()];
+        let mut previous = vec![V2::ZERO; self.balls.len()];
+        for _ in 0..steps {
+            for (i, ball) in self.balls.iter_mut().enumerate() {
+                previous[i] = ball.center;
+                if gone[i] || ball.state != SnowballState::Falling {
+                    continue;
+                }
+                let acceleration = V2::new(wind * WIND_PUSH * START_RADIUS / ball.radius, -gravity);
+                let travel = ball.velocity * step + acceleration * (0.5 * step * step);
+                ball.center += travel;
+                ball.velocity += acceleration * step;
+                ball.angle = (ball.angle - travel.x / ball.radius).rem_euclid(TAU);
+                bounce_at_edges(ball, width);
             }
-            if ball.state != SnowballState::Falling {
-                continue;
-            }
-            active = true;
-            let from = ball.center.y - ball.radius;
-            ball.velocity.y -= gravity * dt;
-            ball.center += ball.velocity * dt;
-            let margin = ball.radius.min(width * 0.5);
-            ball.center.x = ball.center.x.clamp(margin, width - margin);
-            let to = ball.center.y - ball.radius;
-            let mut hit = None;
-            let mut highest = -f32::MAX;
-            for (li, layer) in layers.iter().enumerate() {
-                let Some(i) = layer.index(ball.center.x) else { continue };
-                let surface = seat_height(layer, ball.center.x);
-                let visible = layer.visible[i]
-                    && !layer.occluders.iter().any(|b| ball.center.x >= b[0] && ball.center.x < b[2] && surface >= b[1] && surface < b[3]);
-                if (li == 0 || (visible && ball.velocity.y <= 0.0 && from >= layer.previous_base_y + layer.bed[i]))
-                    && to <= surface
-                    && surface > highest
-                {
-                    hit = Some(li);
-                    highest = surface;
+            // Circle targets can later include each of the three constituent balls of a Snowman.
+            for a in 0..self.balls.len() {
+                for b in a + 1..self.balls.len() {
+                    if gone[a] || gone[b] {
+                        continue;
+                    }
+                    let (left, right) = self.balls.split_at_mut(b);
+                    let (a_ball, b_ball) = (&mut left[a], &mut right[0]);
+                    if a_ball.state == SnowballState::Held
+                        || b_ball.state == SnowballState::Held
+                        || (a_ball.state != SnowballState::Falling && b_ball.state != SnowballState::Falling)
+                    {
+                        continue;
+                    }
+                    let delta = b_ball.center - a_ball.center;
+                    let distance = delta.length();
+                    let reach = a_ball.radius + b_ball.radius;
+                    if distance > reach {
+                        continue;
+                    }
+                    let normal = if distance > 0.001 { delta / distance } else { V2::new(1.0, 0.0) };
+                    let closing = (a_ball.velocity - b_ball.velocity).dot(normal);
+                    if closing > HARD_HIT {
+                        gone[a] = true;
+                        gone[b] = true;
+                        broken.extend([*a_ball, *b_ball]);
+                    } else if a_ball.surface().is_some() {
+                        soft_contact(b_ball, a_ball, -normal, width, layers, ids);
+                    } else if b_ball.surface().is_some() {
+                        soft_contact(a_ball, b_ball, normal, width, layers, ids);
+                    } else {
+                        // Two airborne balls share the separation and a heavily damped normal impulse.
+                        let share = b_ball.area() / (a_ball.area() + b_ball.area());
+                        let overlap = reach - distance + 0.01;
+                        a_ball.center -= normal * (overlap * share);
+                        b_ball.center += normal * (overlap * (1.0 - share));
+                        if closing > 0.0 {
+                            a_ball.velocity -= normal * (closing * 1.15 * share);
+                            b_ball.velocity += normal * (closing * 1.15 * (1.0 - share));
+                        }
+                    }
                 }
             }
-            if let Some(li) = hit {
-                let on = if li == 0 { Surface::Ground } else { Surface::Ledge(ids[li]) };
-                ball.state = SnowballState::Resting { on };
-                ball.velocity = V2::ZERO;
-                ball.support_origin = layers[li].origin;
-                seat(ball, &layers[li]);
+            for (i, ball) in self.balls.iter_mut().enumerate() {
+                if gone[i] || ball.state != SnowballState::Falling {
+                    continue;
+                }
+                let from = previous[i].y - ball.radius;
+                let to = ball.center.y - ball.radius;
+                let mut hit = None;
+                let mut highest = -f32::MAX;
+                for (li, layer) in layers.iter().enumerate() {
+                    let Some(column) = layer.index(ball.center.x) else { continue };
+                    // Do not clamp a landing back into a neighbouring ball at a Ledge end.
+                    // A ball without room for its footprint falls past the end instead.
+                    if li != 0
+                        && (ball.center.x - ball.radius < layer.base().x || ball.center.x + ball.radius > layer.base().x + support_width(layer))
+                    {
+                        continue;
+                    }
+                    let surface = seat_height(layer, ball.center.x);
+                    let visible = layer.visible[column]
+                        && !layer.occluders.iter().any(|b| ball.center.x >= b[0] && ball.center.x < b[2] && surface >= b[1] && surface < b[3]);
+                    if (li == 0 || (visible && ball.velocity.y <= 0.0 && from >= layer.previous_base_y + layer.bed[column]))
+                        && to <= surface
+                        && surface > highest
+                    {
+                        hit = Some(li);
+                        highest = surface;
+                    }
+                }
+                if let Some(li) = hit {
+                    // Impact is relative to the supporting Pile, so a moving Ledge can meet a ball.
+                    let surface_velocity = layers[li].track_velocity + layers[li].offset_velocity;
+                    let impact = (surface_velocity.y - ball.velocity.y).max(0.0);
+                    ball.center.y = highest + ball.radius;
+                    if impact > HARD_LANDING {
+                        gone[i] = true;
+                        broken.push(*ball);
+                    } else {
+                        let on = if li == 0 { Surface::Ground } else { Surface::Ledge(ids[li]) };
+                        ball.state = SnowballState::Resting { on };
+                        ball.velocity = V2::ZERO;
+                        ball.support_origin = layers[li].origin;
+                        seat(ball, &layers[li]);
+                    }
+                }
             }
         }
-        active
+        let mut i = 0;
+        self.balls.retain(|_| {
+            let keep = !gone[i];
+            i += 1;
+            keep
+        });
+        broken
     }
 
     /// Returns balls to this Pile, including at its ends, without discarding any area.
@@ -250,6 +345,66 @@ impl SnowPlay {
         });
         layer.refresh_top();
     }
+}
+
+fn release_velocity(velocity: V2) -> V2 {
+    V2::new(velocity.x.clamp(-1500.0, 1500.0), velocity.y.clamp(-1500.0, 1500.0))
+}
+
+fn bounce_at_edges(ball: &mut Snowball, width: f32) {
+    let margin = ball.radius.min(width * 0.5);
+    if ball.center.x < margin {
+        ball.center.x = margin;
+        if ball.velocity.x < 0.0 {
+            ball.velocity.x *= -EDGE_BOUNCE;
+        }
+    } else if ball.center.x > width - margin {
+        ball.center.x = width - margin;
+        if ball.velocity.x > 0.0 {
+            ball.velocity.x *= -EDGE_BOUNCE;
+        }
+    }
+}
+
+fn soft_contact(ball: &mut Snowball, target: &Snowball, normal: V2, width: f32, layers: &[SnowLayer], ids: &[WindowId]) {
+    if normal.y < -0.5 {
+        let support = match target.surface() {
+            Some(Surface::Ledge(id)) => ids.iter().position(|&known| known == id).map(|i| &layers[i]),
+            _ => None,
+        };
+        land_on_ball(ball, target, width, support);
+        return;
+    }
+    let overlap = ball.radius + target.radius - (ball.center - target.center).length();
+    ball.center -= normal * (overlap + 0.01);
+    let closing = (ball.velocity - target.velocity).dot(normal);
+    if closing > 0.0 {
+        ball.velocity -= normal * (closing * 1.15);
+    }
+    bounce_at_edges(ball, width);
+}
+
+/// #38 will replace sliding off with stacking. Until then a soft drop clears the target's
+/// circle sideways, picking the inward side at screen edges, and falls beside it without growing.
+fn land_on_ball(ball: &mut Snowball, target: &Snowball, width: f32, support: Option<&SnowLayer>) {
+    let reach = ball.radius + target.radius + 0.1;
+    let direction = if ball.center.x < target.center.x { -1.0 } else { 1.0 };
+    let preferred = target.center.x + direction * reach;
+    let other = target.center.x - direction * reach;
+    let margin = ball.radius.min(width * 0.5);
+    let fits = |x| {
+        x >= margin
+            && x <= width - margin
+            && support.is_none_or(|layer| x - ball.radius >= layer.base().x && x + ball.radius <= layer.base().x + support_width(layer))
+    };
+    ball.center.x = if fits(preferred) {
+        preferred
+    } else if fits(other) {
+        other
+    } else {
+        preferred.clamp(margin, width - margin)
+    };
+    ball.velocity = V2::new(0.0, ball.velocity.y.min(0.0));
 }
 
 /// A broad patch must be deep already: a cursor ploughing a dusting into a narrow crest makes no ball.
