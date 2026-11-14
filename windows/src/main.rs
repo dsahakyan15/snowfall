@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod app;
+mod carry;
 mod desktop;
 mod light;
 mod log;

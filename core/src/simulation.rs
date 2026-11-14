@@ -5,7 +5,7 @@ use std::hash::{BuildHasher, Hasher};
 use std::ops::Range;
 
 use crate::geometry::{Rect, V2, smoothstep};
-use crate::layer::SnowLayer;
+use crate::layer::{SnowLayer, sample};
 
 pub type WindowId = isize;
 
@@ -154,6 +154,50 @@ pub struct Sprite {
     pub lump: f32,
 }
 
+/// A Pile as drawn, lent by the screen whose snow keeps it to a screen it reaches into, as a window straddling two
+/// displays does: drawn there, but not simulated.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PileView {
+    /// Where the Pile's first column starts, its bed's top-left.
+    pub origin: V2,
+    /// The snow's surface over each column, above `origin`, then the bed under it; the columns are `COLUMN_WIDTH` apart.
+    pub levels: Vec<f32>,
+    pub beds: Vec<f32>,
+    pub top: f32,
+    pub bottom: f32,
+    pub occluders: Vec<[f32; 4]>,
+    pub drift: f32,
+}
+
+impl PileView {
+    /// The same Pile in another screen's coordinates: `x' = x * scale.0 + offset.0`, likewise for `y`. Heights scale
+    /// with `scale.1`, and the columns are laid out again `COLUMN_WIDTH` apart.
+    pub fn mapped(&self, scale: (f32, f32), offset: (f32, f32)) -> PileView {
+        let map = |x: f32, y: f32| (x * scale.0 + offset.0, y * scale.1 + offset.1);
+        let count = self.levels.len();
+        let columns = ((count as f32 * scale.0).round() as usize).max(1);
+        let resample = |values: &[f32]| -> Vec<f32> { (0..columns).map(|j| sample(values, (j as f32 + 0.5) / scale.0 - 0.5) * scale.1).collect() };
+        let (x, y) = map(self.origin.x, self.origin.y);
+        PileView {
+            origin: V2::new(x, y),
+            levels: resample(&self.levels),
+            beds: resample(&self.beds),
+            top: self.top * scale.1,
+            bottom: self.bottom * scale.1,
+            occluders: self
+                .occluders
+                .iter()
+                .map(|o| {
+                    let (x0, y0) = map(o[0], o[1]);
+                    let (x1, y1) = map(o[2], o[3]);
+                    [x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)]
+                })
+                .collect(),
+            drift: self.drift * scale.0,
+        }
+    }
+}
+
 pub struct PileLayer<'a> {
     pub offset: usize,
     pub count: usize,
@@ -293,6 +337,10 @@ pub struct SnowSimulation {
     dormant: HashMap<WindowId, SnowLayer>,
     /// Windows that went off screen without a word yet on why; a desktop switch keeps their snow, anything else drops it.
     parking: Vec<(WindowId, SnowLayer, f64)>,
+    /// Piles carried in from another screen's snow, waiting for their window to show up here.
+    carried: HashMap<WindowId, SnowLayer>,
+    /// Piles of windows whose snow another screen keeps, drawn here where they reach in, but not simulated.
+    borrowed: Vec<PileView>,
     space_changed_at: f64,
     target_flakes: usize,
     air: Air,
@@ -317,6 +365,8 @@ impl SnowSimulation {
             ids: vec![0],
             dormant: HashMap::new(),
             parking: Vec::new(),
+            carried: HashMap::new(),
+            borrowed: Vec::new(),
             space_changed_at: -10.0,
             target_flakes: 0,
             air: Air {
@@ -403,6 +453,8 @@ impl SnowSimulation {
             && self.air.overflow.is_empty()
             && self.dormant.is_empty()
             && self.parking.is_empty()
+            && self.carried.is_empty()
+            && self.borrowed.is_empty()
             && self.layers.iter().all(|layer| layer.top <= 0.0)
     }
 
@@ -412,7 +464,7 @@ impl SnowSimulation {
 
     /// Floats the renderer needs per frame: each layer's surface and bed.
     pub fn column_count(&self) -> usize {
-        self.layers.iter().map(|layer| 2 * layer.count()).sum()
+        self.layers.iter().map(|layer| 2 * layer.count()).sum::<usize>() + self.borrowed.iter().map(|view| 2 * view.levels.len()).sum::<usize>()
     }
 
     pub fn resize(&mut self, width: f32, height: f32) {
@@ -544,7 +596,130 @@ impl SnowSimulation {
             });
             offset += span;
         }
+        for view in &self.borrowed {
+            let count = view.levels.len();
+            if view.top <= 0.05 || offset + 2 * count > buffer.len() {
+                continue;
+            }
+            buffer[offset..offset + count].copy_from_slice(&view.levels);
+            buffer[offset + count..offset + 2 * count].copy_from_slice(&view.beds);
+            result.push(PileLayer {
+                offset,
+                count,
+                origin: view.origin,
+                top: view.top,
+                bottom: view.bottom,
+                occluders: &view.occluders,
+                drift: view.drift,
+            });
+            offset += 2 * count;
+        }
         result
+    }
+
+    // Carrying between screens
+
+    /// Takes the Pile on window `id`'s Ledge out of this screen's snow, to carry it to another screen's, as when the
+    /// window is dragged there. Snow kept for it out of sight comes too.
+    pub fn take_pile(&mut self, id: WindowId) -> Option<SnowLayer> {
+        // Held columns are known by index, which taking a Ledge out would shift.
+        for li in self.air.held_layers.drain(..) {
+            if let Some(layer) = self.layers.get_mut(li) {
+                layer.release_support();
+            }
+        }
+        if let Some(li) = self.ledge_index(id) {
+            self.ids.remove(li);
+            return Some(self.layers.remove(li));
+        }
+        self.dormant.remove(&id).or_else(|| self.unpark(id)).or_else(|| self.carried.remove(&id))
+    }
+
+    /// Takes in a Pile carried from another screen. If window `id` already has a Ledge here, as when it straddled the
+    /// two displays, the snow joins what lies there; otherwise it shows as soon as the window does. Either way it is
+    /// stretched to the window's width here with the same amount of snow.
+    pub fn bring_pile(&mut self, id: WindowId, mut pile: SnowLayer) {
+        let Some(li) = self.ledge_index(id) else {
+            self.carried.insert(id, pile);
+            return;
+        };
+        let ledge = &mut self.layers[li];
+        pile.resample(ledge.count());
+        for (i, &height) in pile.heights.iter().enumerate() {
+            ledge.set(i, ledge.heights[i] + height);
+        }
+        self.air.heights_changed = true;
+    }
+
+    /// Takes the snow off window `id`'s Ledge here, as places and areas along it, for the screen that keeps the window's
+    /// Pile: what falls on a straddling window's other part joins the one Pile. `None` if there is little to take.
+    pub fn drain_pile(&mut self, id: WindowId) -> Option<Vec<(f32, f32)>> {
+        let li = self.ledge_index(id)?;
+        let ledge = &mut self.layers[li];
+        if ledge.heights.iter().sum::<f32>() * ledge.column_width < 0.5 {
+            return None;
+        }
+        let mut snow = Vec::new();
+        for i in 0..ledge.count() {
+            if ledge.heights[i] > 0.0 {
+                snow.push((ledge.center_x(i), ledge.heights[i] * ledge.column_width));
+                ledge.set(i, 0.0);
+            }
+        }
+        self.air.heights_changed = true;
+        Some(snow)
+    }
+
+    /// Adds snow, as places and areas, to window `id`'s Pile here, as if it had landed there; what misses it falls to
+    /// the Ground.
+    pub fn add_to_pile(&mut self, id: WindowId, snow: &[(f32, f32)]) {
+        let Some(li) = self.ledge_index(id) else {
+            self.air.overflow.extend(snow.iter().map(|&(x, area)| (area, x)));
+            return;
+        };
+        for &(x, area) in snow {
+            // Snow lands here as it would have from the air, filling a column only up to what it holds.
+            let ledge = &mut self.layers[li];
+            let fill = ledge.index(x).map_or(1.0, |i| ledge.fill(i));
+            let missed = ledge.deposit(area * fill, x, false);
+            if missed > 0.0 {
+                self.air.overflow.push((missed, x));
+            }
+        }
+        self.air.heights_changed = true;
+    }
+
+    fn ledge_index(&self, id: WindowId) -> Option<usize> {
+        self.ids.iter().skip(1).position(|&known| known == id).map(|i| i + 1)
+    }
+
+    /// The Pile on window `id`'s Ledge as it is drawn, to lend to a screen the window reaches into.
+    pub fn view_pile(&self, id: WindowId) -> Option<PileView> {
+        let li = self.ledge_index(id)?;
+        let layer = &self.layers[li];
+        let count = layer.count();
+        let mut buffer = vec![0.0; 2 * count];
+        layer.write_smoothed(&mut buffer);
+        let beds = buffer.split_off(count);
+        Some(PileView {
+            origin: layer.base(),
+            levels: buffer,
+            beds,
+            top: layer.top,
+            bottom: -layer.bed_depth,
+            occluders: layer.occluders.to_vec(),
+            drift: layer.drift,
+        })
+    }
+
+    /// The Piles other screens lend this one to draw; a change shows at the next step. Returns whether they changed.
+    pub fn set_borrowed(&mut self, views: Vec<PileView>) -> bool {
+        let changed = views != self.borrowed;
+        if changed {
+            self.borrowed = views;
+            self.air.windows_changed = true;
+        }
+        changed
     }
 
     // Windows
@@ -600,15 +775,22 @@ impl SnowSimulation {
                 }
                 li
             } else {
-                let ledge = match self.dormant.remove(&surface.id).or_else(|| self.unpark(surface.id)) {
-                    Some(mut returning) => {
-                        restore(&mut returning, left, top, columns);
-                        returning.returned_at = self.air.clock;
-                        returning
-                    }
-                    None => {
-                        let phases = (self.air.random.range(0.0, TAU), self.air.random.range(0.0, TAU));
-                        SnowLayer::new(V2::new(left, top), columns, COLUMN_WIDTH, LEDGE_DEPTH, true, phases)
+                let ledge = if let Some(mut carried) = self.carried.remove(&surface.id) {
+                    // Carried over from another screen: it was in plain view there, so it is here at once.
+                    carried.resample(columns);
+                    restore(&mut carried, left, top, columns);
+                    carried
+                } else {
+                    match self.dormant.remove(&surface.id).or_else(|| self.unpark(surface.id)) {
+                        Some(mut returning) => {
+                            restore(&mut returning, left, top, columns);
+                            returning.returned_at = self.air.clock;
+                            returning
+                        }
+                        None => {
+                            let phases = (self.air.random.range(0.0, TAU), self.air.random.range(0.0, TAU));
+                            SnowLayer::new(V2::new(left, top), columns, COLUMN_WIDTH, LEDGE_DEPTH, true, phases)
+                        }
                     }
                 };
                 self.layers.push(ledge);

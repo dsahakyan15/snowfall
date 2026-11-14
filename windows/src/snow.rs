@@ -16,6 +16,7 @@ use windows::core::{HSTRING, PCWSTR, Result, w};
 
 use snowfall_core::simulation::SnowSimulation;
 
+use crate::carry::Carry;
 use crate::desktop::{self, DesktopLayer};
 use crate::light::{Sky, Wallpapers};
 use crate::log;
@@ -85,6 +86,7 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
     let mut desktop_logged = String::new();
     let mut stats = Stats::new(started);
     let mut tracker = Tracker::new();
+    let mut carry = Carry::default();
     watch_taskbar(links.wake);
 
     loop {
@@ -221,6 +223,8 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
             }
             if screens.iter().any(|screen| screen.next_due <= now + clock.tolerance()) {
                 tracker.refresh(&clock, now);
+                // Snow of windows moved to another screen goes with them before any screen steps.
+                carry.update(&mut screens, &tracker, now);
             }
             // Behind the windows the snow still settles on them: what lies on a window's top edge is above it, in plain view.
             let windows = &tracker;
