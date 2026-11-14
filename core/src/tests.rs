@@ -794,3 +794,16 @@ fn a_pile_brought_to_a_window_with_snow_of_its_own_joins_it() {
     let joined = on_window(&to);
     assert!((joined - (a + b)).abs() < (a + b) * 0.03, "{a} and {b} joined into {joined}");
 }
+
+#[test]
+fn a_pile_carried_for_a_window_that_never_arrives_is_let_go() {
+    let none = HashSet::new();
+    let mut from = SnowSimulation::new(1280.0, 800.0, Snowfall::HeavySnow);
+    from.update_windows(&[surface(7, 300.0, 500.0, 600.0)], 0.2, &none, &none, false);
+    run(&mut from, 20.0, AWAY);
+    let mut to = SnowSimulation::new(1280.0, 800.0, Snowfall::Off);
+    to.bring_pile(7, from.take_pile(7).unwrap());
+    assert!(!to.is_empty(), "the carried Pile waits for its window");
+    run(&mut to, 3.0, AWAY);
+    assert!(to.is_empty(), "the carried Pile is still kept with no window for it");
+}

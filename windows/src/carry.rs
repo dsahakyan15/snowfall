@@ -18,12 +18,16 @@ const HYSTERESIS: f32 = 32.0;
 #[derive(Default)]
 pub struct Carry {
     keepers: HashMap<WindowId, String>,
+    /// Each window's visible width on each screen, as of the windows' `generation` and the screens' `layout`.
+    spans: HashMap<WindowId, Vec<(usize, f32)>>,
+    generation: u64,
+    layout: Vec<String>,
 }
 
 impl Carry {
     /// Hands over the Piles of windows that moved to another screen, gathers what falls on a straddling window's other
-    /// parts into its one Pile, and lends that Pile to the screens it reaches into. `now` wakes screens whose lent
-    /// Piles changed.
+    /// parts into its one Pile, and lends that Pile to the screens it reaches into. `now` wakes the screens whose snow
+    /// this changed.
     pub fn update(&mut self, screens: &mut [Screen], tracker: &Tracker, now: i64) {
         if screens.len() < 2 {
             self.keepers.clear();
@@ -32,22 +36,19 @@ impl Carry {
             }
             return;
         }
-        // Each window's visible width on each screen, in physical pixels.
-        let mut spans: HashMap<WindowId, Vec<(usize, f32)>> = HashMap::new();
-        for (index, screen) in screens.iter().enumerate() {
-            let width = screen.simulation.width();
-            let scale = screen.scale().0;
-            for surface in screen.surfaces(tracker) {
-                let visible = surface.frame.max_x().min(width) - surface.frame.min_x().max(0.0);
-                if visible > 0.0 {
-                    spans.entry(surface.id).or_default().push((index, visible / scale));
-                }
-            }
+        // Where each window is only changes with the windows or the displays: the costly part is worked out then.
+        let layout: Vec<String> = screens.iter().map(|screen| screen.monitor.name.clone()).collect();
+        if tracker.generation != self.generation || layout != self.layout {
+            self.spans = spans(screens, tracker);
+            self.generation = tracker.generation;
+            self.layout = layout;
+            let spans = &self.spans;
+            self.keepers.retain(|id, _| spans.contains_key(id));
         }
-        self.keepers.retain(|id, _| spans.contains_key(id));
 
         let mut lent: Vec<Vec<_>> = vec![Vec::new(); screens.len()];
-        for (&id, candidates) in &spans {
+        let mut touched = vec![false; screens.len()];
+        for (&id, candidates) in &self.spans {
             let previous = self.keepers.get(&id).and_then(|name| screens.iter().position(|screen| &screen.monitor.name == name));
             let keeper = keeper(candidates, previous);
             if let Some(previous) = previous
@@ -55,14 +56,19 @@ impl Carry {
                 && let Some(pile) = screens[previous].simulation.take_pile(id)
             {
                 screens[keeper].simulation.bring_pile(id, pile);
+                touched[previous] = true;
+                touched[keeper] = true;
             }
             self.keepers.insert(id, screens[keeper].monitor.name.clone());
             for &(index, _) in candidates.iter().filter(|(index, _)| *index != keeper) {
                 // What fell on the window's part here joins the one Pile, and that Pile is drawn here where it reaches.
-                let (scale, offset) = screens[index].mapping_to(&screens[keeper]);
+                // Depths are in points on every screen; only places map, and so an area stretches as its width does.
                 if let Some(snow) = screens[index].simulation.drain_pile(id) {
-                    let snow: Vec<_> = snow.into_iter().map(|(x, area)| (x * scale.0 + offset.0, area * scale.0 * scale.1)).collect();
+                    let (scale, offset) = screens[index].mapping_to(&screens[keeper]);
+                    let snow: Vec<_> = snow.into_iter().map(|(x, area)| (x * scale.0 + offset.0, area * scale.0)).collect();
                     screens[keeper].simulation.add_to_pile(id, &snow);
+                    touched[index] = true;
+                    touched[keeper] = true;
                 }
                 if let Some(view) = screens[keeper].simulation.view_pile(id) {
                     let (scale, offset) = screens[keeper].mapping_to(&screens[index]);
@@ -70,12 +76,28 @@ impl Carry {
                 }
             }
         }
-        for (screen, lent) in screens.iter_mut().zip(lent) {
-            if screen.simulation.set_borrowed(lent) {
+        for ((screen, lent), touched) in screens.iter_mut().zip(lent).zip(touched) {
+            if screen.simulation.set_borrowed(lent) || touched {
                 screen.wake(now);
             }
         }
     }
+}
+
+/// Each window's visible width on each screen, in physical pixels.
+fn spans(screens: &[Screen], tracker: &Tracker) -> HashMap<WindowId, Vec<(usize, f32)>> {
+    let mut spans: HashMap<WindowId, Vec<(usize, f32)>> = HashMap::new();
+    for (index, screen) in screens.iter().enumerate() {
+        let width = screen.simulation.width();
+        let scale = screen.scale().0;
+        for surface in screen.surfaces(tracker) {
+            let visible = surface.frame.max_x().min(width) - surface.frame.min_x().max(0.0);
+            if visible > 0.0 {
+                spans.entry(surface.id).or_default().push((index, visible / scale));
+            }
+        }
+    }
+    spans
 }
 
 /// The screen that keeps a window's snow: the one most of it is on, unless the one keeping it now has nearly as much.

@@ -453,6 +453,9 @@ fn shift(h: &mut [f32], p: &mut [f32], amount: f32, from: usize, to: usize) {
 
 /// `values` read at a fractional index, between neighbours in a straight line, and held at the ends.
 pub fn sample(values: &[f32], at: f32) -> f32 {
+    if values.is_empty() {
+        return 0.0;
+    }
     let last = values.len() - 1;
     let at = at.clamp(0.0, last as f32);
     let i = (at.floor() as usize).min(last);
