@@ -276,7 +276,7 @@ impl Surface {
     }
 
     pub fn draw(&mut self, gpu: &Gpu, simulation: &SnowSimulation, ambient: Ambient, time: f32) -> Result<()> {
-        self.reserve(gpu, simulation.sprite_count() + simulation.snowballs().len(), simulation.column_count())?;
+        self.reserve(gpu, simulation.sprite_count() + simulation.snowballs().len() + simulation.snowmen().len() * 3, simulation.column_count())?;
         let (Some(sprite_buffer), Some((height_buffer, height_view))) = (&self.sprites, &self.heights) else {
             return Ok(());
         };
@@ -287,6 +287,10 @@ impl Surface {
             let sprites = simulation.write_sprites(std::slice::from_raw_parts_mut(mapped.pData.cast::<Sprite>(), self.sprite_capacity));
             let balls = simulation
                 .write_snowballs(std::slice::from_raw_parts_mut(mapped.pData.cast::<Sprite>().add(sprites), self.sprite_capacity - sprites));
+            let men = simulation.write_snowmen(std::slice::from_raw_parts_mut(
+                mapped.pData.cast::<Sprite>().add(sprites + balls),
+                self.sprite_capacity - sprites - balls,
+            ));
             context.Unmap(sprite_buffer, 0);
 
             context.Map(height_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut mapped))?;
@@ -345,7 +349,7 @@ impl Surface {
                 }
             }
             uniforms.occluder_count = 0;
-            if sprites + balls > 0 {
+            if sprites + balls + men > 0 {
                 gpu.write(&gpu.uniforms, &uniforms)?;
                 let stride = size_of::<Sprite>() as u32;
                 let offset = 0;
@@ -363,6 +367,14 @@ impl Surface {
                     uniforms.occluders[..count].copy_from_slice(&occluders[..count]);
                     gpu.write(&gpu.uniforms, &uniforms)?;
                     context.DrawInstanced(4, 1, 0, (sprites + i) as u32);
+                }
+                for (i, man) in simulation.snowmen().iter().enumerate() {
+                    let occluders = simulation.snowman_occluders(man);
+                    let count = occluders.len().min(MAX_OCCLUDERS);
+                    uniforms.occluder_count = count as i32;
+                    uniforms.occluders[..count].copy_from_slice(&occluders[..count]);
+                    gpu.write(&gpu.uniforms, &uniforms)?;
+                    context.DrawInstanced(4, 3, 0, (sprites + balls + i * 3) as u32);
                 }
             }
             self.swap_chain.Present(1, DXGI_PRESENT(0)).ok()

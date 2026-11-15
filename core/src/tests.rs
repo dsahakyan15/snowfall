@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use crate::geometry::{Rect, V2};
+
 use crate::layer::SnowLayer;
 use crate::play::{SnowPlay, Snowball, SnowballState, Surface};
 use crate::simulation::{Pace, SnowSimulation, Snowfall, Sprite, Wind, WindowSurface};
@@ -620,7 +621,7 @@ fn repeated_snowball_breaks_make_broad_mounds_including_at_screen_edges() {
 }
 
 #[test]
-fn soft_drops_slide_beside_another_ball_without_overlap_even_at_screen_edges() {
+fn two_soft_dropped_balls_stack_without_overlap_even_at_screen_edges() {
     for x in [500.0, 20.0, 1260.0] {
         let mut simulation = bare_play();
         ground_ball(&mut simulation, x, 20.0);
@@ -632,6 +633,9 @@ fn soft_drops_slide_beside_another_ball_without_overlap_even_at_screen_edges() {
         settle_play(&mut simulation, area);
         assert_eq!(simulation.snowballs().len(), 2);
         let (a, b) = (simulation.snowballs()[0], simulation.snowballs()[1]);
+        assert_eq!(b.stacked_on, Some(a.id));
+        assert_eq!(b.center.x, a.center.x);
+        assert!(simulation.snowmen().is_empty());
         assert_eq!(a.state, SnowballState::Resting { on: Surface::Ground });
         assert_eq!(b.state, a.state);
         assert!((a.center - b.center).length() >= a.radius + b.radius - 0.05);
@@ -661,14 +665,14 @@ fn held_and_flying_balls_stay_interactive_then_return_to_idle() {
 }
 
 #[test]
-fn a_soft_drop_near_a_ledge_end_slides_inward_without_overlap() {
+fn a_larger_soft_drop_near_a_ledge_end_slides_inward_without_overlap() {
     let mut simulation = bare_play();
     simulation.update_windows(&[surface(7, 100.0, 300.0, 450.0)], DT, &HashSet::new(), &HashSet::new(), false);
     let target = flight_ball(V2::new(500.0, 321.0), 20.0);
     simulation.bring_snowball(target);
     simulation.step(0.05, AWAY);
     assert_eq!(simulation.snowballs()[0].state, SnowballState::Resting { on: Surface::Ledge(7) });
-    let ball = flight_ball(V2::new(500.0, 365.0), 20.0);
+    let ball = flight_ball(V2::new(500.0, 375.0), 30.0);
     simulation.bring_snowball(ball);
     let area = simulation.snow_area();
     settle_play(&mut simulation, area);
@@ -695,6 +699,290 @@ fn side_edges_bounce_softly_and_the_top_stays_open() {
         settle_play(&mut simulation, ball.area());
         assert!(simulation.snowballs().is_empty(), "the return from above the top is a hard landing");
     }
+}
+
+/// Build through collisions, rather than constructing a Snowman directly.
+fn build_snowman(simulation: &mut SnowSimulation, y: f32) -> crate::play::Snowman {
+    let mut top = y;
+    for radius in [24.0, 18.0, 12.0] {
+        let ball = flight_ball(V2::new(500.0, top + radius + 1.0), radius);
+        simulation.bring_snowball(ball);
+        let area = simulation.snow_area();
+        settle_play(simulation, area);
+        top += 2.0 * radius;
+    }
+    assert!(simulation.snowballs().is_empty());
+    assert_eq!(simulation.snowmen().len(), 1);
+    simulation.snowmen()[0]
+}
+
+#[test]
+fn three_ordered_balls_form_one_snowman_with_their_exact_area_and_a_new_id() {
+    let mut simulation = bare_play();
+    let bottom = ground_ball(&mut simulation, 500.0, 24.0);
+    let middle = flight_ball(V2::new(500.0, 67.0), 18.0);
+    simulation.bring_snowball(middle);
+    settle_play(&mut simulation, bottom.area() + middle.area());
+    assert_eq!(simulation.snowballs()[1].stacked_on, Some(bottom.id));
+    assert!(simulation.snowmen().is_empty());
+    let top = flight_ball(V2::new(500.0, 97.0), 12.0);
+    simulation.bring_snowball(top);
+    let area = bottom.area() + middle.area() + top.area();
+    settle_play(&mut simulation, area);
+    assert!(simulation.snowballs().is_empty());
+    let man = simulation.snowmen()[0];
+    assert_eq!(man.radii, [24.0, 18.0, 12.0]);
+    assert!(![bottom.id, middle.id, top.id].contains(&man.id));
+    assert!((man.area() - area).abs() < 0.01);
+    assert_eq!(man.surface(), Some(Surface::Ground));
+}
+
+#[test]
+fn unordered_balls_cannot_form_a_snowman_even_within_the_stack_tolerance() {
+    for radius in [21.0, 30.0] {
+        let mut simulation = bare_play();
+        ground_ball(&mut simulation, 500.0, 20.0);
+        let middle = flight_ball(V2::new(500.0, 41.0 + radius), radius);
+        simulation.bring_snowball(middle);
+        let area = simulation.snow_area();
+        settle_play(&mut simulation, area);
+        let middle = simulation.snowballs()[1];
+        assert_eq!(middle.stacked_on.is_some(), radius <= 22.0);
+        let top = flight_ball(middle.center + V2::new(0.0, radius + 12.0 + 1.0), 12.0);
+        simulation.bring_snowball(top);
+        let area = simulation.snow_area();
+        settle_play(&mut simulation, area);
+        assert!(simulation.snowmen().is_empty());
+        assert_eq!(simulation.snowballs().len(), 3);
+    }
+}
+
+#[test]
+fn snowmen_ride_their_ledge_hop_on_fast_motion_then_become_idle() {
+    let mut simulation = bare_play();
+    simulation.update_windows(&[surface(7, 100.0, 300.0, 1000.0)], DT, &HashSet::new(), &HashSet::new(), false);
+    let man = build_snowman(&mut simulation, 300.0);
+    simulation.update_windows(&[surface(7, 125.0, 312.0, 1000.0)], 0.2, &HashSet::new(), &HashSet::new(), true);
+    simulation.step(DT, AWAY);
+    let moved = simulation.snowmen()[0];
+    assert!((moved.center - man.center - V2::new(25.0, 12.0)).length() < 0.05);
+    let mut hopped = false;
+    for i in 0..20 {
+        let left = if i % 2 == 0 { 145.0 } else { 105.0 };
+        simulation.update_windows(&[surface(7, left, 312.0, 1000.0)], DT, &HashSet::new(), &HashSet::new(), false);
+        simulation.step(DT, AWAY);
+        hopped |= simulation.snowmen()[0].hop_offset > 0.0;
+    }
+    assert!(hopped, "fast back-and-forth motion should trigger a hop");
+    settle_play(&mut simulation, man.area());
+    let man = simulation.snowmen()[0];
+    assert_eq!(man.state, SnowballState::Resting { on: Surface::Ledge(7) });
+    assert_eq!((man.hop_offset, man.hop_velocity), (0.0, 0.0));
+}
+
+#[test]
+fn snowmen_survive_closed_jumping_and_shedding_windows_and_land_on_ground() {
+    for event in 0..3 {
+        let mut simulation = bare_play();
+        simulation.update_windows(&[surface(7, 100.0, 500.0, 1000.0)], DT, &HashSet::new(), &HashSet::new(), false);
+        let man = build_snowman(&mut simulation, 500.0);
+        match event {
+            0 => simulation.update_windows(&[], DT, &HashSet::new(), &HashSet::new(), false),
+            1 => simulation.update_windows(&[surface(7, 900.0, 750.0, 1000.0)], DT, &HashSet::new(), &HashSet::new(), false),
+            _ => {
+                // Same vertical fling used to test balls on empty Ledges.
+                for i in 1..=15 {
+                    simulation.update_windows(&[surface(7, 100.0, 500.0 - i as f32 * 40.0, 1000.0)], DT, &HashSet::new(), &HashSet::new(), false);
+                    simulation.step(DT, AWAY);
+                    if simulation.snowmen()[0].state == SnowballState::Falling {
+                        break;
+                    }
+                }
+            }
+        }
+        assert_eq!(simulation.snowmen()[0].state, SnowballState::Falling);
+        simulation.update_windows(&[], DT, &HashSet::new(), &HashSet::new(), false);
+        settle_play(&mut simulation, man.area());
+        assert_eq!(simulation.snowmen()[0].state, SnowballState::Resting { on: Surface::Ground });
+        assert_eq!(simulation.snowmen()[0].id, man.id);
+    }
+}
+
+#[test]
+fn every_snowman_circle_can_be_grabbed_carried_between_dpi_spaces_and_dropped() {
+    for circle in 0..3 {
+        let mut from = bare_play();
+        let mut to = bare_play();
+        let man = build_snowman(&mut from, 0.0);
+        let point = man.circles()[circle].0 + V2::new(2.0, 1.0);
+        assert_eq!(from.snowman_at(point), Some(man.id));
+        assert_eq!(from.snowman_at(man.center + V2::new(25.0, 0.0)), None);
+        assert!(from.grab(man.id, point));
+        assert!(!from.grab(man.id, point));
+        let mut carried = from.take_snowman(man.id).unwrap();
+        carried.map_to((2.0 / 3.0, 2.0 / 3.0), (100.0, 50.0));
+        to.bring_snowman(carried);
+        let pointer = V2::new(650.0, 450.0);
+        to.move_held(pointer);
+        let held = to.snowmen()[0];
+        let offset = man.center - point;
+        assert!((held.center - pointer - offset * (2.0 / 3.0)).length() < 0.001);
+        assert_eq!(held.id, man.id);
+        assert_eq!(held.radii, man.radii);
+        assert_eq!(held.area(), man.area());
+        assert!(from.snowmen().is_empty());
+        to.release(V2::new(120.0, 20.0));
+        settle_play(&mut to, man.area());
+        assert_eq!(to.snowmen()[0].surface(), Some(Surface::Ground));
+    }
+}
+
+#[test]
+fn hard_thrown_ball_hits_break_every_snowman_circle_and_conserve_snow() {
+    for circle in 0..3 {
+        for dt in [1.0 / 30.0, 1.0 / 144.0] {
+            let mut simulation = bare_play();
+            let man = build_snowman(&mut simulation, 0.0);
+            let (center, radius) = man.circles()[circle];
+            let mut thrown = flight_ball(center - V2::new(radius + 10.0, 0.0), 6.0);
+            thrown.velocity = V2::new(1200.0, 0.0);
+            simulation.bring_snowball(thrown);
+            let area = simulation.snow_area();
+            simulation.step(dt, AWAY);
+            assert!(simulation.snowmen().is_empty());
+            assert!(simulation.snowballs().is_empty());
+            assert!(simulation.sprite_count() > 0);
+            settle_play(&mut simulation, area);
+        }
+    }
+}
+
+#[test]
+fn snowman_sprites_and_grabbing_share_circles_opacity_and_occluders() {
+    let mut simulation = bare_play();
+    simulation.update_windows(&[surface(7, 100.0, 300.0, 1000.0)], DT, &HashSet::new(), &HashSet::new(), false);
+    let man = build_snowman(&mut simulation, 300.0);
+    simulation.set_opacity(0.4);
+    let mut sprites = [Sprite::default(); 3];
+    assert_eq!(simulation.write_snowmen(&mut sprites), 3);
+    for (sprite, (center, r)) in sprites.iter().zip(man.circles()) {
+        assert_eq!(sprite.position, center);
+        assert_eq!(sprite.size, r * 2.0);
+        assert_eq!(sprite.alpha, 0.4);
+    }
+    assert_eq!(sprites.map(|s| s.ball), [1.0, 2.0, 3.0]);
+    let head = man.circles()[2].0;
+    let mut ledge = surface(7, 100.0, 300.0, 1000.0);
+    ledge.blockers.push(Rect { x: head.x - 20.0, y: head.y - 20.0, width: 40.0, height: 40.0 });
+    simulation.update_windows(&[ledge], DT, &HashSet::new(), &HashSet::new(), false);
+    assert_eq!(simulation.snowman_at(head), None);
+    assert!(!simulation.grab(man.id, head));
+    assert_eq!(simulation.snowman_at(man.center), Some(man.id));
+}
+
+#[test]
+fn disabling_or_clearing_snowmen_returns_all_their_snow_in_every_state() {
+    for state in 0..3 {
+        let mut simulation = bare_play();
+        let man = build_snowman(&mut simulation, 0.0);
+        if state > 0 {
+            assert!(simulation.grab(man.id, man.center));
+            simulation.move_held(V2::new(600.0, 400.0));
+            if state == 2 {
+                simulation.release(V2::ZERO);
+            }
+        }
+        simulation.set_snowballs(false);
+        assert!(!simulation.grab(man.id, man.center));
+        assert!(simulation.snowmen().is_empty());
+        settle_play(&mut simulation, man.area());
+    }
+    let mut simulation = bare_play();
+    build_snowman(&mut simulation, 0.0);
+    simulation.blow_away(1.0, true);
+    assert!(simulation.snowmen().is_empty());
+}
+#[test]
+fn grabbing_either_ball_detaches_a_stack_and_keeps_both_balls() {
+    for grab_top in [false, true] {
+        let mut simulation = bare_play();
+        let bottom = ground_ball(&mut simulation, 500.0, 24.0);
+        let top = flight_ball(V2::new(500.0, 67.0), 18.0);
+        simulation.bring_snowball(top);
+        let area = simulation.snow_area();
+        settle_play(&mut simulation, area);
+        let target = simulation.snowballs()[usize::from(grab_top)];
+        assert!(simulation.grab(target.id, target.center));
+        simulation.move_held(target.center + V2::new(150.0, 80.0));
+        simulation.step(DT, AWAY);
+        assert!(simulation.snowballs().iter().all(|ball| ball.stacked_on.is_none()));
+        simulation.release(V2::ZERO);
+        settle_play(&mut simulation, area);
+        assert_eq!(simulation.snowballs().len(), 2);
+        assert!(simulation.snowballs().iter().any(|ball| ball.id == bottom.id));
+        assert!(simulation.snowmen().is_empty());
+    }
+}
+
+#[test]
+fn a_snowman_transfers_with_its_ledge_without_turning_back_into_a_pile() {
+    let mut from = bare_play();
+    from.update_windows(&[surface(7, 100.0, 300.0, 1000.0)], DT, &HashSet::new(), &HashSet::new(), false);
+    let man = build_snowman(&mut from, 300.0);
+    let mut carried = from.take_snowman(man.id).unwrap();
+    let pile = from.take_pile(7).unwrap();
+    assert!(from.snowmen().is_empty());
+    assert_eq!(from.snow_area(), 0.0);
+    carried.map_to((2.0 / 3.0, 2.0 / 3.0), (100.0, 50.0));
+    let mut to = bare_play();
+    let left = 100.0 * (2.0 / 3.0) + 100.0;
+    to.update_windows(&[surface(7, left, 250.0, 1000.0 * (2.0 / 3.0))], DT, &HashSet::new(), &HashSet::new(), false);
+    to.bring_pile(7, pile);
+    to.bring_snowman(carried);
+    settle_play(&mut to, man.area());
+    let arrived = to.snowmen()[0];
+    assert_eq!(arrived.id, man.id);
+    assert_eq!(arrived.radii, man.radii);
+    assert!((arrived.center.x - (man.center.x * (2.0 / 3.0) + 100.0)).abs() < 0.01);
+    assert!((arrived.center.y - 274.0).abs() < 0.05);
+    to.update_windows(&[surface(7, left + 15.0, 256.0, 1000.0 * (2.0 / 3.0))], 0.2, &HashSet::new(), &HashSet::new(), true);
+    to.step(DT, AWAY);
+    assert!((to.snowmen()[0].center - arrived.center - V2::new(15.0, 6.0)).length() < 0.05);
+}
+
+#[test]
+fn snowmen_survive_soft_ball_contacts_and_held_snowmen_ignore_hits() {
+    for held in [false, true] {
+        let mut simulation = bare_play();
+        let man = build_snowman(&mut simulation, 0.0);
+        if held {
+            assert!(simulation.grab(man.id, man.center));
+        }
+        let (center, r) = man.circles()[1];
+        let mut ball = flight_ball(center - V2::new(r + 7.0, 0.0), 6.0);
+        ball.velocity = V2::new(if held { 1200.0 } else { 200.0 }, 0.0);
+        simulation.bring_snowball(ball);
+        let area = simulation.snow_area();
+        simulation.step(DT, AWAY);
+        assert_eq!(simulation.snowmen().len(), 1);
+        assert_eq!(simulation.snowballs().len(), 1);
+        assert!((simulation.snow_area() - area).abs() < 0.01);
+    }
+}
+
+#[test]
+fn disabled_snow_play_cannot_stack_existing_balls() {
+    let mut source = bare_play();
+    let bottom = ground_ball(&mut source, 500.0, 24.0);
+    let top = flight_ball(V2::new(500.0, 67.0), 18.0);
+    let mut play = SnowPlay::new();
+    play.enabled = false;
+    play.balls.extend([bottom, top]);
+    let mut ground = SnowLayer::new(V2::ZERO, 641, 2.0, 40.0, false, (0.0, 0.0));
+    ground.right = 1280.0;
+    assert!(play.fly(&[ground], &[0], 1280.0, 0.1, 2500.0, 0.0).is_empty());
+    assert!(play.balls.iter().all(|ball| ball.stacked_on.is_none()));
+    assert!(play.snowmen.is_empty());
 }
 
 fn run(simulation: &mut SnowSimulation, seconds: f32, cursor: V2) {
@@ -1131,7 +1419,7 @@ fn survives_a_long_chaotic_session() {
         let surfaces: Vec<WindowSurface> = windows.iter().map(|&(id, x, top, width)| surface(id, x, top, width)).collect();
         simulation.update_windows(&surfaces, DT, &none, &none, false);
         if next() < 0.3 {
-            cursor = cursor + V2::new((next() - 0.5) * 300.0, (next() - 0.5) * 200.0);
+            cursor += V2::new((next() - 0.5) * 300.0, (next() - 0.5) * 200.0);
         }
         if frame % 5000 == 0 {
             simulation.thaws = !simulation.thaws;

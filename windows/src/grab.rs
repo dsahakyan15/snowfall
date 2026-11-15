@@ -1,4 +1,4 @@
-//! Small input windows for Snowballs. They and the simulations live on the snow thread; callbacks only queue input.
+//! Small input windows for Snowballs and Snowmen. Callbacks on the snow thread only queue input.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    ClientToScreen, CombineRgn, CreateEllipticRgn, CreateRectRgn, DeleteObject, GetStockObject, HBRUSH, RGN_AND, RGN_DIFF, SetWindowRgn, WHITE_BRUSH,
+    ClientToScreen, CombineRgn, CreateEllipticRgn, CreateRectRgn, DeleteObject, GetStockObject, HBRUSH, RGN_AND, RGN_DIFF, RGN_OR, SetWindowRgn,
+    WHITE_BRUSH,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetCapture, ReleaseCapture, SetCapture, VK_LBUTTON};
@@ -15,7 +16,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{Error, PCWSTR, Result, w};
 
 use snowfall_core::geometry::V2;
-use snowfall_core::play::{Snowball, SnowballId};
+use snowfall_core::play::SnowballId;
 
 use crate::log;
 use crate::screen::Screen;
@@ -109,7 +110,7 @@ impl Grabs {
 
     fn move_to(&mut self, screens: &mut [Screen], point: V2, at: Instant, now: i64) {
         let Some(id) = self.held else { return };
-        let Some(from) = screens.iter().position(|screen| screen.simulation.snowballs().iter().any(|ball| ball.id == id)) else {
+        let Some(from) = screens.iter().position(|screen| has_target(screen, id)) else {
             self.held = None;
             return;
         };
@@ -127,6 +128,10 @@ impl Grabs {
                 ball.map_to(scale, offset);
                 screens[to].simulation.bring_snowball(ball);
                 screens[from].wake(now);
+            } else if let Some(mut man) = screens[from].simulation.take_snowman(id) {
+                man.map_to(scale, offset);
+                screens[to].simulation.bring_snowman(man);
+                screens[from].wake(now);
             }
         }
         let local = screens[to].local(point.x, point.y);
@@ -137,7 +142,7 @@ impl Grabs {
     fn release(&mut self, screens: &mut [Screen], now: i64) {
         let Some(id) = self.held.take() else { return };
         for screen in screens {
-            if screen.simulation.snowballs().iter().any(|ball| ball.id == id) {
+            if has_target(screen, id) {
                 screen.simulation.release(release_velocity(&self.samples, screen.scale()));
                 screen.wake(now);
                 break;
@@ -149,9 +154,7 @@ impl Grabs {
     /// Geometry and capture affinity are cached: resting balls cause no window updates.
     pub fn sync(&mut self, screens: &mut [Screen], settings: &Settings, running: bool, now: i64) {
         let enabled = running && settings.snowballs && !settings.behind_windows;
-        if self.held.is_some_and(|id| {
-            !enabled || !screens.iter().any(|screen| screen.can_grab() && screen.simulation.snowballs().iter().any(|ball| ball.id == id))
-        }) {
+        if self.held.is_some_and(|id| !enabled || !screens.iter().any(|screen| screen.can_grab() && has_target(screen, id))) {
             self.release(screens, now);
             unsafe {
                 let _ = ReleaseCapture();
@@ -164,9 +167,20 @@ impl Grabs {
         }
         let mut present = HashSet::new();
         for screen in screens.iter().filter(|screen| screen.can_grab()) {
-            for ball in screen.simulation.snowballs() {
-                let shape = Shape::new(screen, ball);
-                present.insert(ball.id);
+            let targets = screen
+                .simulation
+                .snowballs()
+                .iter()
+                .map(|ball| (ball.id, Shape::new(screen, &[(ball.center, ball.radius)], screen.simulation.snowball_occluders(ball))))
+                .chain(
+                    screen
+                        .simulation
+                        .snowmen()
+                        .iter()
+                        .map(|man| (man.id, Shape::new(screen, &man.circles(), screen.simulation.snowman_occluders(man)))),
+                );
+            for (id, shape) in targets {
+                present.insert(id);
                 if !self.registered {
                     match register() {
                         Ok(()) => self.registered = true,
@@ -176,8 +190,8 @@ impl Grabs {
                         }
                     }
                 }
-                if let std::collections::hash_map::Entry::Vacant(entry) = self.windows.entry(ball.id) {
-                    match HitWindow::new(ball.id, &shape, settings.show_in_screenshots, screen.overlay_window()) {
+                if let std::collections::hash_map::Entry::Vacant(entry) = self.windows.entry(id) {
+                    match HitWindow::new(id, &shape, settings.show_in_screenshots, screen.overlay_window()) {
                         Ok(window) => {
                             entry.insert(window);
                         }
@@ -187,17 +201,21 @@ impl Grabs {
                         }
                     }
                 }
-                if let Some(window) = self.windows.get_mut(&ball.id) {
-                    if let Err(error) = window.update(shape, settings.show_in_screenshots, screen.overlay_window()) {
-                        log!("Snowball input update failed: {error}");
-                        // A stale hit target must never remain over another app.
-                        present.remove(&ball.id);
-                    }
+                if let Some(window) = self.windows.get_mut(&id)
+                    && let Err(error) = window.update(shape, settings.show_in_screenshots, screen.overlay_window())
+                {
+                    log!("Snowball input update failed: {error}");
+                    // A stale hit target must never remain over another app.
+                    present.remove(&id);
                 }
             }
         }
         self.windows.retain(|id, _| present.contains(id));
     }
+}
+
+fn has_target(screen: &Screen, id: SnowballId) -> bool {
+    screen.simulation.snowballs().iter().any(|ball| ball.id == id) || screen.simulation.snowmen().iter().any(|man| man.id == id)
 }
 
 fn release_velocity(samples: &VecDeque<(Instant, V2)>, scale: (f32, f32)) -> V2 {
@@ -213,11 +231,12 @@ fn release_velocity(samples: &VecDeque<(Instant, V2)>, scale: (f32, f32)) -> V2 
 struct Shape {
     rect: RECT,
     clip: RECT,
+    circles: Vec<RECT>,
     blockers: Vec<RECT>,
 }
 
 impl Shape {
-    fn new(screen: &Screen, ball: &Snowball) -> Self {
+    fn new(screen: &Screen, circles: &[(V2, f32)], occluders: &[[f32; 4]]) -> Self {
         let (sx, sy) = screen.scale();
         let area = screen.monitor.rect;
         let pixels = |left: f32, bottom: f32, right: f32, top: f32| RECT {
@@ -226,13 +245,19 @@ impl Shape {
             right: area.left + (right / sx).ceil() as i32,
             bottom: area.bottom - (bottom / sy).floor() as i32,
         };
-        let r = ball.radius;
-        let rect = pixels(ball.center.x - r, ball.center.y - r, ball.center.x + r, ball.center.y + r);
+        let circles: Vec<_> = circles.iter().map(|&(c, r)| pixels(c.x - r, c.y - r, c.x + r, c.y + r)).collect();
+        let rect = circles.iter().fold(circles[0], |a, b| RECT {
+            left: a.left.min(b.left),
+            top: a.top.min(b.top),
+            right: a.right.max(b.right),
+            bottom: a.bottom.max(b.bottom),
+        });
         let relative = |r: RECT| RECT { left: r.left - rect.left, top: r.top - rect.top, right: r.right - rect.left, bottom: r.bottom - rect.top };
         Self {
             rect,
             clip: relative(area),
-            blockers: screen.simulation.snowball_occluders(ball).iter().map(|b| relative(pixels(b[0], b[1], b[2], b[3]))).collect(),
+            circles: circles.into_iter().map(relative).collect(),
+            blockers: occluders.iter().map(|b| relative(pixels(b[0], b[1], b[2], b[3]))).collect(),
         }
     }
 }
@@ -323,10 +348,18 @@ impl HitWindow {
 
     fn region(&self, shape: &Shape) -> Result<()> {
         unsafe {
-            let r = shape.rect;
-            let region = CreateEllipticRgn(0, 0, r.right - r.left, r.bottom - r.top);
+            let region = CreateRectRgn(0, 0, 0, 0);
             if region.is_invalid() {
                 return Err(Error::from_thread());
+            }
+            for r in &shape.circles {
+                let circle = CreateEllipticRgn(r.left, r.top, r.right, r.bottom);
+                let result = CombineRgn(Some(region), Some(region), Some(circle), RGN_OR);
+                let _ = DeleteObject(circle.into());
+                if result.0 == 0 {
+                    let _ = DeleteObject(region.into());
+                    return Err(Error::from_thread());
+                }
             }
             for (r, mode) in std::iter::once((&shape.clip, RGN_AND)).chain(shape.blockers.iter().map(|r| (r, RGN_DIFF))) {
                 let cut = CreateRectRgn(r.left, r.top, r.right, r.bottom);

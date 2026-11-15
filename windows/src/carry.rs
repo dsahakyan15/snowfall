@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use snowfall_core::play::Surface;
 use snowfall_core::simulation::WindowId;
 
 use crate::screen::Screen;
@@ -51,6 +52,23 @@ impl Carry {
         for (&id, candidates) in &self.spans {
             let previous = self.keepers.get(&id).and_then(|name| screens.iter().position(|screen| &screen.monitor.name == name));
             let keeper = keeper(candidates, previous);
+            // Move entities before take_pile/drain_pile; their packed snow stays in the Snowman.
+            for from in 0..screens.len() {
+                if from == keeper {
+                    continue;
+                }
+                let ids: Vec<_> =
+                    screens[from].simulation.snowmen().iter().filter(|man| man.surface() == Some(Surface::Ledge(id))).map(|man| man.id).collect();
+                let (scale, offset) = screens[from].mapping_to(&screens[keeper]);
+                for entity in ids {
+                    if let Some(mut man) = screens[from].simulation.take_snowman(entity) {
+                        man.map_to(scale, offset);
+                        screens[keeper].simulation.bring_snowman(man);
+                        touched[from] = true;
+                        touched[keeper] = true;
+                    }
+                }
+            }
             if let Some(previous) = previous
                 && previous != keeper
                 && let Some(pile) = screens[previous].simulation.take_pile(id)
