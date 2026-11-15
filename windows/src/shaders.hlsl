@@ -106,6 +106,35 @@ float4 spriteFragment(SpriteOut i) : SV_Target {
         float2 spot = frac(turned * 5.0) - 0.5;
         float dimple = (1.0 - smoothstep(0.04, 0.19, length(spot))) * step(0.73, hash(cell));
         color -= dimple * 0.055 * (1.0 - smoothstep(0.75, 1.0, r));
+        // Original procedural Snowman details, fixed in points and antialiased with derivatives.
+        // Kind 2 is the middle ball; kind 3 is the head. No time-dependent idle animation.
+        if (i.ball > 1.5 && i.ball < 2.5) {
+            float buttons = min(length(q - float2(0.0, 0.35)), min(length(q - float2(0.0, -0.03)), length(q - float2(0.0, -0.41))));
+            float coal = 1.0 - smoothstep(0.085 - aa, 0.085 + aa, buttons);
+            color = lerp(color, float3(0.10, 0.13, 0.17) + lit * 0.055, coal);
+            // A broad collar at the head/middle join and a softly rounded hanging end.
+            float band = max(abs(q.x) - 0.66, abs(q.y - 0.98) - 0.13);
+            float2 tailPoint = q - float2(0.36, 0.61);
+            float tail = length(max(abs(tailPoint) - float2(0.105, 0.35), 0.0)) - 0.035;
+            float scarf = 1.0 - smoothstep(-aa, aa, min(band, tail));
+            float stripe = smoothstep(0.07, 0.09, abs(frac((q.y + q.x * 0.16) * 6.0) - 0.5));
+            float stitch = sin(q.x * 95.0 + abs(frac(q.y * 32.0) - 0.5) * 5.0) * 0.035;
+            float3 wool = lerp(float3(0.92, 0.22, 0.22), float3(0.65, 0.045, 0.09), stripe) + stitch;
+            color = lerp(color, wool * (0.86 + lit * 0.14), scarf);
+            body = max(body, scarf);
+        }
+        if (i.ball > 2.5) {
+            float eyes = min(length(q - float2(-0.28, 0.26)), length(q - float2(0.28, 0.26)));
+            float coal = 1.0 - smoothstep(0.095 - aa, 0.095 + aa, eyes);
+            color = lerp(color, float3(0.09, 0.12, 0.16), coal);
+            float glint = min(length(q - float2(-0.30, 0.29)), length(q - float2(0.26, 0.29)));
+            color = lerp(color, float3(0.7, 0.77, 0.85), (1.0 - smoothstep(0.018, 0.04, glint)) * coal);
+            float nx = q.x + 0.08;
+            float noseEdge = max(max(-nx, nx - 0.88), abs(q.y + 0.10) - 0.17 * (1.0 - nx / 0.88));
+            float carrot = 1.0 - smoothstep(-aa, aa, noseEdge);
+            float ridges = sin(nx * 38.0) * 0.035;
+            color = lerp(color, lerp(float3(0.90, 0.28, 0.035), float3(1.0, 0.61, 0.12), saturate(q.y * 3.0 + 0.8)) + ridges, carrot);
+        }
         float2 contact = float2(q.x / 0.9, (q.y + 0.97) / 0.16);
         float shadow = exp(-dot(contact, contact) * 2.0) * 0.2 * (1.0 - body);
         float a = (body + shadow) * i.alpha;

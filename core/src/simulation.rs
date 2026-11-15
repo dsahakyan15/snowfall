@@ -6,7 +6,7 @@ use std::ops::Range;
 
 use crate::geometry::{Rect, V2, smoothstep};
 use crate::layer::{SnowLayer, sample};
-use crate::play::{SnowPlay, Snowball, SnowballId, SnowballState, Surface};
+use crate::play::{SnowPlay, Snowball, SnowballId, SnowballState, Snowman, Surface};
 
 pub type WindowId = isize;
 
@@ -153,7 +153,7 @@ pub struct Sprite {
     pub tint: [f32; 3],
     /// Gives a lump of snow its ragged outline and tumble; zero for a round flake.
     pub lump: f32,
-    /// One for a Snowball, zero for a flake or loose snow.
+    /// Zero for airborne snow, one for a plain ball, two/three for a Snowman's middle/head.
     pub ball: f32,
     pub angle: f32,
 }
@@ -461,7 +461,7 @@ impl SnowSimulation {
 
     /// Turning Snowballs off returns their snow to their supporting Piles.
     pub fn set_snowballs(&mut self, on: bool) {
-        if !on && !self.play.balls.is_empty() {
+        if !on && !self.play.is_empty() {
             self.return_snowballs();
             self.air.windows_changed = true;
         }
@@ -470,6 +470,41 @@ impl SnowSimulation {
 
     pub fn snowballs(&self) -> &[Snowball] {
         &self.play.balls
+    }
+
+    pub fn snowmen(&self) -> &[Snowman] {
+        &self.play.snowmen
+    }
+
+    pub fn snowman_at(&self, point: V2) -> Option<SnowballId> {
+        self.play
+            .snowmen
+            .iter()
+            .rev()
+            .find(|man| {
+                man.contains(point)
+                    && !self.snowman_occluders(man).iter().any(|b| point.x >= b[0] && point.x < b[2] && point.y >= b[1] && point.y < b[3])
+            })
+            .map(|m| m.id)
+    }
+
+    pub fn take_snowman(&mut self, id: SnowballId) -> Option<Snowman> {
+        let i = self.play.snowmen.iter().position(|m| m.id == id)?;
+        self.air.windows_changed = true;
+        Some(self.play.snowmen.remove(i))
+    }
+
+    /// Takes a Snowman already mapped to this screen, preserving identity and snow area.
+    pub fn bring_snowman(&mut self, man: Snowman) {
+        self.play.snowmen.push(man);
+        self.air.windows_changed = true;
+    }
+
+    pub fn snowman_occluders(&self, man: &Snowman) -> &[[f32; 4]] {
+        match man.surface() {
+            Some(Surface::Ledge(id)) => self.ledge_index(id).map_or(&[], |li| self.layers[li].occluders.as_slice()),
+            _ => &[],
+        }
     }
 
     /// The topmost visible Snowball under this point, using its circular outline.
@@ -486,7 +521,7 @@ impl SnowSimulation {
     }
 
     pub fn grab(&mut self, id: SnowballId, point: V2) -> bool {
-        if self.snowball_at(point) != Some(id) || !self.play.grab(id, point) {
+        if (self.snowball_at(point) != Some(id) && self.snowman_at(point) != Some(id)) || !self.play.grab(id, point) {
             return false;
         }
         self.air.windows_changed = true;
@@ -531,17 +566,22 @@ impl SnowSimulation {
             + self.parking.iter().map(|(_, pile, _)| area(pile)).sum::<f32>()
             + self.carried.values().map(|(pile, _)| area(pile)).sum::<f32>()
             + self.play.balls.iter().map(Snowball::area).sum::<f32>()
+            + self.play.snowmen.iter().map(Snowman::area).sum::<f32>()
             + self.air.grains.iter().map(|grain| grain.area).sum::<f32>()
             + self.air.overflow.iter().map(|(area, _)| area).sum::<f32>()
     }
 
     fn return_snowballs(&mut self) {
-        if self.play.balls.is_empty() {
+        if self.play.is_empty() {
             return;
         }
         for (li, layer) in self.layers.iter_mut().enumerate() {
             let on = if li == 0 { Surface::Ground } else { Surface::Ledge(self.ids[li]) };
             self.play.return_to(on, layer);
+            self.play.return_snowmen_to(on, layer);
+        }
+        for man in self.play.snowmen.drain(..) {
+            self.air.overflow.push((man.area(), man.center.x));
         }
         // Held and Falling balls have no Pile; returning them to snow still keeps every point of area.
         for ball in self.play.balls.drain(..) {
@@ -550,14 +590,14 @@ impl SnowSimulation {
     }
 
     pub fn has_snow(&self) -> bool {
-        !self.play.balls.is_empty() || self.layers.iter().any(|layer| layer.top > 0.5)
+        !self.play.is_empty() || self.layers.iter().any(|layer| layer.top > 0.5)
     }
 
     /// Nothing falls or waits for its window, and nothing will until snowfall is turned on: the screen can rest.
     pub fn is_empty(&self) -> bool {
         self.snowfall == Snowfall::Off
             && self.sprite_count() == 0
-            && self.play.balls.is_empty()
+            && self.play.is_empty()
             && self.air.gust.is_none()
             && self.air.overflow.is_empty()
             && self.dormant.is_empty()
@@ -599,14 +639,15 @@ impl SnowSimulation {
         self.expire_parking();
         for (li, ledge) in self.layers.iter_mut().enumerate().skip(1) {
             let on = Surface::Ledge(self.ids[li]);
-            let has_ball = self.play.balls.iter().any(|ball| ball.surface() == Some(on));
+            let has_ball =
+                self.play.balls.iter().any(|ball| ball.surface() == Some(on)) || self.play.snowmen.iter().any(|man| man.surface() == Some(on));
             if let Some(velocity) = self.air.carry(ledge, dt, has_ball) {
                 self.play.shed_on(Surface::Ledge(self.ids[li]), velocity);
             }
         }
         // Follow window motion before testing whether the pointer is still pushing a ball.
         self.advance_snowballs(0.0);
-        if self.play.balls.iter().any(|ball| ball.state == SnowballState::Held) {
+        if self.play.held() {
             // A drag moves the ball without rolling up more snow or carving the Pile underneath it.
             self.air.cursor = Some(cursor + CURSOR_OFFSET);
             self.air.cursor_velocity = V2::ZERO;
@@ -642,14 +683,12 @@ impl SnowSimulation {
         }
         let air = &self.air;
         // Only a cursor that actually displaces snow needs the full rate; one passing near it or resting in it changes nothing.
-        let pushed = air.clock - air.last_window_motion < 0.6
-            || air.clock - air.last_cursor_push < 0.3
-            || air.gust.is_some()
-            || self.play.balls.iter().any(|ball| matches!(ball.state, SnowballState::Held | SnowballState::Falling));
+        let pushed = air.clock - air.last_window_motion < 0.6 || air.clock - air.last_cursor_push < 0.3 || air.gust.is_some() || self.play.active();
         // The steady trickle off window corners is a few tiny grains at a time; they read fine at the calm rate.
         let flying = air.grains.len() > 24
             || air.slide_wind.abs() > 20.0
-            || self.play.balls.iter().any(|ball| !matches!(ball.state, SnowballState::Resting { .. }));
+            || self.play.balls.iter().any(|ball| !matches!(ball.state, SnowballState::Resting { .. }))
+            || self.play.active();
         self.pace = if pushed {
             Pace::Interactive
         } else if flying {
@@ -663,7 +702,7 @@ impl SnowSimulation {
     }
 
     fn advance_snowballs(&mut self, dt: f32) {
-        if self.play.balls.is_empty() {
+        if self.play.is_empty() {
             return;
         }
         for (li, layer) in self.layers.iter_mut().enumerate() {
@@ -672,7 +711,7 @@ impl SnowSimulation {
                 self.air.heights_changed = true;
             }
         }
-        if dt > 0.0 && self.play.balls.iter().any(|ball| matches!(ball.state, SnowballState::Held | SnowballState::Falling)) {
+        if dt > 0.0 && self.play.active() {
             let broken = self.play.fly(&self.layers, &self.ids, self.width, dt, GRAVITY, self.air.wind_speed());
             for ball in broken {
                 self.air.break_snowball(&ball, &mut self.layers, self.width);
@@ -686,6 +725,25 @@ impl SnowSimulation {
         let mut written = 0;
         for (slot, ball) in buffer.iter_mut().zip(&self.play.balls) {
             *slot = Sprite { position: ball.center, size: ball.radius * 2.0, alpha: self.opacity, ball: 1.0, angle: ball.angle, ..Sprite::default() };
+            written += 1;
+        }
+        written
+    }
+
+    /// Three shaded sprites; the GPU decorates the middle and head.
+    pub fn write_snowmen(&self, buffer: &mut [Sprite]) -> usize {
+        let sprites = self.play.snowmen.iter().flat_map(|man| {
+            man.circles().into_iter().enumerate().map(|(i, (center, radius))| Sprite {
+                position: center,
+                size: radius * 2.0,
+                alpha: self.opacity,
+                ball: [1.0, 2.0, 3.0][i],
+                ..Sprite::default()
+            })
+        });
+        let mut written = 0;
+        for (slot, sprite) in buffer.iter_mut().zip(sprites) {
+            *slot = sprite;
             written += 1;
         }
         written
@@ -951,8 +1009,12 @@ impl SnowSimulation {
                 if sliding && columns == ledge.count() {
                     self.air.pan(ledge, left, top);
                 } else {
+                    let displacement = V2::new(left, top) - ledge.origin;
+                    let same_width = columns == ledge.count();
                     if self.air.move_ledge(ledge, left, right, top, columns, interval) {
                         self.play.shed_on(Surface::Ledge(surface.id), V2::ZERO);
+                    } else if same_width {
+                        self.play.jolt_on(Surface::Ledge(surface.id), displacement.length() / interval.max(1.0 / 120.0));
                     }
                 }
                 li
@@ -987,7 +1049,7 @@ impl SnowSimulation {
             ledge.update_visibility(self.width, &blockers);
         }
 
-        if !self.play.balls.is_empty() {
+        if !self.play.is_empty() {
             for &id in self.ids.iter().skip(1).filter(|id| !seen.contains(id)) {
                 self.play.shed_on(Surface::Ledge(id), V2::ZERO);
             }
@@ -1676,6 +1738,7 @@ impl Air {
             // A granular bed shaken well past gravity throws grains off its surface.
             let rate = (0.06 * (ledge.agitation - shakes)).min(0.8);
             let picks = (ledge.count() as f32 * rate * dt * 2.0 + self.random.next()) as usize;
+            let mut released = false;
             for _ in 0..picks {
                 let column = ((self.random.next() * ledge.count() as f32) as usize).min(ledge.count() - 1);
                 let h = ledge.heights[column];
@@ -1686,8 +1749,9 @@ impl Air {
                 let velocity = carried + V2::new(self.random.range(-80.0, 80.0), self.random.range(50.0, 200.0));
                 let position = V2::new(ledge.center_x(column), ledge.floor(column) + h * 0.5);
                 self.release(h * 0.5 * COLUMN_WIDTH, position, velocity, V2::new(COLUMN_WIDTH / 2.0, h * 0.5), 0.25);
+                released = true;
             }
-            if picks > 0 {
+            if released {
                 self.heights_changed = true;
             }
         }
