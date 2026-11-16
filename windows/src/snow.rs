@@ -40,6 +40,7 @@ pub enum Command {
     Active(bool),
     /// Blows all the snow away; when calm, for less motion, melts it where it lies instead.
     ClearSnow(bool),
+    SendSnowplough,
     Quit,
 }
 
@@ -98,11 +99,11 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
                 Command::Quit => return Ok(()),
                 Command::Settings(next) => {
                     let previous = std::mem::replace(&mut settings, next);
-                    let snow = |s: &Settings| (s.level, s.wind, s.keep_windows_clear, s.snowballs, s.melt, s.opacity);
+                    let snow = |s: &Settings| (s.level, s.wind, s.keep_windows_clear, s.snowballs, s.plough_taskbar, s.melt, s.opacity);
                     if snow(&settings) != snow(&previous) {
                         let now = Clock::now();
                         screens.iter_mut().for_each(|screen| {
-                            configure(&mut screen.simulation, &settings);
+                            configure(&mut screen.simulation, &settings, screen.monitor.primary);
                             screen.wake(now);
                         });
                     }
@@ -129,6 +130,12 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
                     if settings.behind_windows {
                         layer = find_layer();
                         screens = sync_screens(&gpu, &settings, &mut layout, screens, layer, true, power);
+                    }
+                }
+                Command::SendSnowplough => {
+                    if let Some(screen) = screens.iter_mut().find(|screen| screen.monitor.primary) {
+                        screen.simulation.send_snowplough();
+                        screen.wake(Clock::now());
                     }
                 }
                 Command::ClearSnow(calm) => {
@@ -329,6 +336,7 @@ fn sync_screens(
             Some(screen) => {
                 let covered = screen.covered();
                 let mut simulation = screen.simulation;
+                simulation.set_main_screen(monitor.primary);
                 let (width, height) = dip_size(&monitor);
                 simulation.resize(width as f32, height as f32);
                 (simulation, covered)
@@ -399,12 +407,14 @@ fn find_layer() -> Option<DesktopLayer> {
 fn new_simulation(monitor: &Monitor, settings: &Settings) -> SnowSimulation {
     let (width, height) = dip_size(monitor);
     let mut simulation = SnowSimulation::new(width as f32, height as f32, settings.level);
-    configure(&mut simulation, settings);
+    configure(&mut simulation, settings, monitor.primary);
     simulation
 }
 
 /// Gives a screen's snow the settings that shape it.
-fn configure(simulation: &mut SnowSimulation, settings: &Settings) {
+fn configure(simulation: &mut SnowSimulation, settings: &Settings, main_screen: bool) {
+    simulation.set_main_screen(main_screen);
+    simulation.set_plough_taskbar(settings.plough_taskbar);
     simulation.set_snowfall(settings.level);
     simulation.set_wind(settings.wind);
     simulation.set_snowballs(settings.snowballs);

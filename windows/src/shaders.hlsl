@@ -107,7 +107,12 @@ float4 spriteFragment(SpriteOut i) : SV_Target {
         float2 spot = frac(turned * 5.0) - 0.5;
         float dimple = (1.0 - smoothstep(0.04, 0.19, length(spot))) * step(0.73, hash(cell));
         color -= dimple * 0.055 * (1.0 - smoothstep(0.75, 1.0, r));
-        float2 detail = float2(q.x * (i.tint.a < 0.0 ? i.spin : 1.0), q.y);
+        float2 detail = q;
+        if (i.tint.a < 0.0) {
+            float leanC = cos(i.soft), leanS = sin(i.soft);
+            detail = float2(leanC * q.x + leanS * q.y, -leanS * q.x + leanC * q.y);
+            detail.x *= i.spin;
+        }
         // Original procedural Snowman details, fixed in points and antialiased with derivatives.
         // Kind 2 is the middle ball; kind 3 is the head. No time-dependent idle animation.
         if (i.ball > 1.5 && i.ball < 2.5) {
@@ -225,4 +230,107 @@ float4 pileFragment(PileOut i) : SV_Target {
 
     color *= light.rgb;
     return float4(color * coverage, coverage);
+}
+
+// The Snowplough uses the same constants: origin is its back, pileTop its direction,
+// pileBottom distance travelled, columnWidth the snow at the blade, time its running time.
+struct PloughOut {
+    float4 position : SV_Position;
+    float2 local : TEXCOORD0;
+};
+
+PloughOut ploughVertex(uint id : SV_VertexID) {
+    float2 corner = float2(float(id & 1), float(id >> 1));
+    PloughOut o;
+    o.local = lerp(float2(-16.0, -5.0), float2(220.0, max(135.0, columnWidth + 60.0)), corner);
+    float2 world = origin + float2(o.local.x * pileTop, o.local.y);
+    o.position = float4(world / viewSize * 2.0 - 1.0, 0.0, 1.0);
+    return o;
+}
+
+float ploughBox(float2 p, float2 center, float2 halfSize, float radius) {
+    float2 q = abs(p - center) - halfSize + radius;
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - radius;
+}
+
+float ploughLine(float2 p, float2 a, float2 b) {
+    float2 d = b - a;
+    return length(p - a - d * saturate(dot(p - a, d) / dot(d, d)));
+}
+
+void ploughPaint(inout float4 canvas, float3 color, float distance, float opacity) {
+    float aa = max(fwidth(distance), 0.55);
+    float alpha = (1.0 - smoothstep(-aa, aa, distance)) * opacity;
+    canvas = float4(color * alpha + canvas.rgb * (1.0 - alpha), alpha + canvas.a * (1.0 - alpha));
+}
+
+float4 ploughFragment(PloughOut i) : SV_Target {
+    float2 p = i.local;
+    float4 color = 0.0;
+    // Soft shadow, then the dark capsule-shaped tracks.
+    float shadow = saturate(1.0 - length((p - float2(58.0, 0.0)) / float2(65.0, 4.0)));
+    color = float4(float3(0.045, 0.06, 0.09) * shadow * 0.23, shadow * 0.23);
+    float tracks = ploughBox(p, float2(52.0, 8.5), float2(48.0, 8.5), 8.5);
+    ploughPaint(color, float3(0.13, 0.15, 0.18), tracks, 1.0);
+    float tread = abs(ploughBox(p, float2(52.0, 8.5), float2(46.5, 7.0), 7.0)) - 0.8;
+    // The tread advances along both straight runs and around their curved ends.
+    float2 end = p - float2(clamp(p.x, 12.5, 91.5), 8.5);
+    float along = p.y > 8.5 ? p.x : 184.0 - p.x;
+    if (p.x < 12.5) along = 184.0 + (atan2(end.y, -end.x) + 1.5708) * 7.0;
+    if (p.x > 91.5) along = 91.5 + (1.5708 - atan2(end.y, end.x)) * 7.0;
+    float dash = step(0.55, frac((along - pileBottom) / 7.0));
+    ploughPaint(color, float3(0.38, 0.41, 0.46), tread, dash * 0.65);
+    [unroll]
+    for (int k = 0; k < 5; k++) {
+        float2 wheel = p - float2(14.0 + float(k) * 19.0, 8.5);
+        ploughPaint(color, float3(0.23, 0.26, 0.30), length(wheel) - 5.5, 1.0);
+        float spin = -pileBottom / 5.5;
+        float spoke = abs(dot(wheel, float2(cos(spin), sin(spin)))) - 0.8;
+        ploughPaint(color, float3(0.45, 0.49, 0.54), max(spoke, length(wheel) - 4.6), 1.0);
+        ploughPaint(color, float3(0.15, 0.17, 0.20), length(wheel) - 1.3, 1.0);
+    }
+    float3 yellow = lerp(float3(0.91, 0.61, 0.0), float3(1.0, 0.83, 0.25), saturate((p.y - 17.0) / 48.0));
+    ploughPaint(color, yellow, ploughBox(p, float2(53.0, 29.0), float2(45.0, 12.5), 5.0), 1.0);
+    ploughPaint(color, yellow, ploughBox(p, float2(36.0, 54.0), float2(22.0, 15.0), 6.0), 1.0);
+    float window = ploughBox(p, float2(36.0, 55.5), float2(16.0, 8.5), 3.0);
+    ploughPaint(color, lerp(float3(0.42, 0.69, 0.87), float3(0.70, 0.87, 0.98), saturate(p.y / 70.0)), window, 1.0);
+    float highlight = max(abs(p.x + p.y * 0.6 - 61.0) - 2.5, window);
+    ploughPaint(color, 1.0, highlight, 0.5);
+    ploughPaint(color, float3(0.95, 0.70, 0.07), ploughBox(p, float2(78.0, 25.0), float2(14.0, 4.0), 0.0), 1.0);
+    float stripe = step(0.55, frac((p.x + p.y * 0.6) / 9.0));
+    ploughPaint(color, float3(0.16, 0.18, 0.21), ploughBox(p, float2(78.0, 25.0), float2(14.0, 4.0), 0.0), stripe);
+    ploughPaint(color, float3(0.30, 0.33, 0.37), ploughBox(p, float2(68.5, 47.0), float2(2.5, 8.0), 0.8), 1.0);
+    ploughPaint(color, float3(0.21, 0.24, 0.28), ploughBox(p, float2(68.5, 55.0), float2(4.0, 1.5), 0.8), 1.0);
+    // A 1.6 Hz beacon with a warm halo.
+    float on = step(0.0, sin(time * 10.053096));
+    float glow = exp(-dot(p - float2(36.0, 73.0), p - float2(36.0, 73.0)) / 110.0) * on * 0.34;
+    color = float4(float3(1.0, 0.48, 0.08) * glow + color.rgb * (1.0 - glow), glow + color.a * (1.0 - glow));
+    float beacon = max(length(p - float2(36.0, 72.0)) - 4.5, 70.0 - p.y);
+    ploughPaint(color, lerp(float3(0.63, 0.32, 0.10), float3(1.0, 0.55, 0.11), on), beacon, 1.0);
+    ploughPaint(color, float3(0.28, 0.31, 0.35), ploughLine(p, float2(96.0, 25.0), float2(110.0, 6.0)) - 2.0, 1.0);
+    // A bowed orange blade with a straight grey cutting edge.
+    float v = saturate((p.y - 1.0) / 30.0);
+    float right = 124.0 - 2.0 * v - 14.0 * v * v;
+    float left = 110.0 - 2.0 * v;
+    float blade = max(max(left - p.x, p.x - right), max(1.0 - p.y, p.y - 31.0));
+    ploughPaint(color, lerp(float3(0.72, 0.22, 0.06), float3(0.98, 0.43, 0.13), saturate((p.x - left) / 12.0)), blade, 1.0);
+    ploughPaint(color, float3(0.63, 0.68, 0.73), ploughBox(p, float2(117.0, 2.5), float2(8.0, 1.5), 0.4), 1.0);
+    // Small grey exhaust puffs drift back. They are part of this one quad, with no snow area.
+    [unroll]
+    for (int smoke = 0; smoke < 4; smoke++) {
+        float age = frac(time * 0.9 + float(smoke) * 0.25);
+        float2 center = float2(68.5 - age * 28.0, 58.0 + age * 58.0);
+        float radius = 2.5 + age * 6.0;
+        float d = length(p - center) / radius;
+        float a = (1.0 - smoothstep(0.25, 1.0, d)) * (1.0 - age) * 0.28 * smoothstep(0.0, 0.1, age);
+        color = float4(float3(0.60, 0.65, 0.71) * a + color.rgb * (1.0 - a), a + color.a * (1.0 - a));
+    }
+    [unroll]
+    for (int snow = 0; snow < 7; snow++) {
+        float age = frac(time * 1.7 + float(snow) / 7.0);
+        float2 center = float2(127.0 + age * (38.0 + float(snow) * 4.0), columnWidth + 2.0 + age * 80.0 - age * age * 95.0);
+        float a = (1.0 - age) * step(2.5, columnWidth);
+        ploughPaint(color, float3(0.96, 0.98, 1.0), length(p - center) - (1.2 + float(snow % 3) * 0.6), a);
+    }
+    return color;
 }

@@ -7,6 +7,7 @@ use std::ops::Range;
 use crate::geometry::{Rect, V2, smoothstep};
 use crate::layer::{SnowLayer, sample};
 use crate::play::{FIGHT_BALL_RADIUS, SnowPlay, Snowball, SnowballId, SnowballState, Snowman, Surface};
+use crate::plough::{Plough, Snowplough};
 
 pub type WindowId = isize;
 
@@ -158,7 +159,7 @@ pub struct Sprite {
     pub angle: f32,
 }
 
-// Snowman sprites reuse angle for facing, lump for dent lifetime (0..1), and tint
+// Snowman sprites reuse angle for facing, soft for tilt, lump for dent lifetime (0..1), and tint
 // for the dent's direction (xy) and original radius (z), relative to its circle.
 
 /// A Pile as drawn, lent by the screen whose snow keeps it to a screen it reaches into, as a window straddling two
@@ -354,6 +355,7 @@ pub struct SnowSimulation {
     space_changed_at: f64,
     target_flakes: usize,
     play: SnowPlay,
+    plough: Plough,
     air: Air,
 }
 
@@ -383,6 +385,7 @@ impl SnowSimulation {
             space_changed_at: -10.0,
             target_flakes: 0,
             play: SnowPlay::new(),
+            plough: Plough::new(),
             air: Air {
                 flakes: Vec::new(),
                 grains: Vec::new(),
@@ -472,6 +475,49 @@ impl SnowSimulation {
             self.air.windows_changed = true;
         }
         self.play.enabled = on;
+    }
+
+    /// Allows automatic visits; sending a Snowplough still works with this off.
+    pub fn set_plough_taskbar(&mut self, on: bool) {
+        self.plough.automatic = on;
+    }
+
+    /// Only the main screen gets a Snowplough.
+    pub fn set_main_screen(&mut self, main: bool) {
+        self.plough.main_screen = main;
+        if !main {
+            self.plough.stop();
+        }
+    }
+
+    /// Sends one at once, unless one is already driving through.
+    pub fn send_snowplough(&mut self) {
+        if self.plough.running.is_some() {
+            return;
+        }
+        self.plough.send(self.width, &mut self.air.random);
+        if self.plough.running.is_some() {
+            self.pace = Pace::Lively;
+            self.air.windows_changed = true;
+        }
+    }
+
+    pub fn snowplough(&self) -> Option<&Snowplough> {
+        self.plough.running.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ploughed_area(&self) -> f64 {
+        self.plough.removed_area
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fill_ground(&mut self, depth: f32) {
+        let ground = &mut self.layers[0];
+        for i in 0..ground.count() {
+            ground.set(i, depth);
+        }
+        ground.refresh_top();
     }
 
     pub fn snowballs(&self) -> &[Snowball] {
@@ -569,7 +615,7 @@ impl SnowSimulation {
         }
     }
 
-    /// Snow area in Piles, Snowballs and loose snow, including Piles kept out of sight.
+    /// Snow area in Piles, Snowballs and loose snow, including Piles and the Snowplough's load kept out of sight.
     /// Incoming flakes and decorative powder are excluded; snowfall, Melt and gusts change this total.
     pub fn snow_area(&self) -> f32 {
         let area = |pile: &SnowLayer| pile.heights.iter().sum::<f32>() * pile.column_width + pile.spill_left + pile.spill_right;
@@ -581,6 +627,7 @@ impl SnowSimulation {
             + self.play.snowmen.iter().map(Snowman::area).sum::<f32>()
             + self.air.grains.iter().map(|grain| grain.area).sum::<f32>()
             + self.air.overflow.iter().map(|(area, _)| area).sum::<f32>()
+            + self.plough.running.as_ref().map_or(0.0, |plough| plough.carried as f32)
     }
 
     fn return_snowballs(&mut self) {
@@ -611,6 +658,7 @@ impl SnowSimulation {
         self.snowfall == Snowfall::Off
             && self.sprite_count() == 0
             && self.play.is_empty()
+            && self.plough.running.is_none()
             && self.air.gust.is_none()
             && self.air.overflow.is_empty()
             && self.dormant.is_empty()
@@ -644,6 +692,9 @@ impl SnowSimulation {
     /// Returns whether anything visible changed.
     pub fn step(&mut self, dt: f32, cursor: V2) -> bool {
         self.air.clock += dt as f64;
+        if self.air.gust.is_none() {
+            self.plough.wait(&self.layers[0], GROUND_DEPTH, dt, &mut self.air.random);
+        }
         let was_moving = self.sprite_count() > 0;
         self.air.heights_changed = false;
 
@@ -693,6 +744,15 @@ impl SnowSimulation {
             self.air.heights_changed = true;
         }
 
+        if let Some(plough) = &mut self.plough.running {
+            self.plough.removed_area += plough.advance(&mut self.layers[0], dt);
+            self.plough.removed_area += self.play.plough(plough, &self.layers[0], self.width);
+            self.air.heights_changed = true;
+            if (plough.direction > 0.0 && plough.x > self.width + 20.0) || (plough.direction < 0.0 && plough.x < -20.0) {
+                self.plough.stop();
+            }
+        }
+
         for layer in &mut self.layers {
             layer.refresh_top();
             layer.previous_base_y = layer.base().y;
@@ -701,7 +761,8 @@ impl SnowSimulation {
         // Only a cursor that actually displaces snow needs the full rate; one passing near it or resting in it changes nothing.
         let pushed = air.clock - air.last_window_motion < 0.6 || air.clock - air.last_cursor_push < 0.3 || air.gust.is_some() || self.play.active();
         // The steady trickle off window corners is a few tiny grains at a time; they read fine at the calm rate.
-        let flying = air.grains.len() > 24
+        let flying = self.plough.running.is_some()
+            || air.grains.len() > 24
             || air.slide_wind.abs() > 20.0
             || self.play.fighting()
             || self.play.balls.iter().any(|ball| !matches!(ball.state, SnowballState::Resting { .. }))
@@ -756,6 +817,7 @@ impl SnowSimulation {
                 alpha: self.opacity,
                 ball: [1.0, 2.0, 3.0][i],
                 angle: man.facing,
+                soft: man.tilt,
                 tint_amount: -1.0,
                 tint: man.dents[i].map_or([0.0; 3], |d| [d.direction.x, d.direction.y, d.radius]),
                 lump: man.dents[i].map_or(0.0, |d| (d.remaining / 5.0).clamp(0.0, 1.0)),
@@ -1360,6 +1422,8 @@ impl SnowSimulation {
     /// Clears all the snow: a gust in `direction` lifts it off the ground and the windows and blows it off the screen,
     /// or, `calm`, it melts away where it lies.
     pub fn blow_away(&mut self, direction: f32, calm: bool) {
+        // Clear snow ends the visit too; its usual gust takes the mound with the rest.
+        self.plough.stop();
         self.return_snowballs();
         let direction = if direction < 0.0 { -1.0 } else { 1.0 };
         self.air.gust = Some(Gust { start: self.air.clock, direction, calm });
@@ -1535,7 +1599,11 @@ impl SnowSimulation {
             layer.outside = outside;
         }
         let melts: Vec<_> = (0..self.layers.len()).map(|li| self.melt(li, melt_pace)).collect();
-        for (layer, melt) in self.layers.iter_mut().zip(melts) {
+        for (li, (layer, melt)) in self.layers.iter_mut().zip(melts).enumerate() {
+            // Snow against the blade stays packed until pushed off the edge.
+            if li == 0 && self.plough.running.is_some() {
+                continue;
+            }
             if let Some((pace, floor, rate, time)) = melt
                 && layer.thaw(dt * pace, floor, rate, time)
             {

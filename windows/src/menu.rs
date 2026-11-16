@@ -8,6 +8,7 @@ use crate::strings::{Language, Strings};
 pub enum Action {
     Change(Change),
     ClearSnow,
+    SendSnowplough,
     CheckForUpdates,
     Quit,
 }
@@ -64,10 +65,12 @@ pub fn build(settings: &Settings, context: &Context) -> Vec<Item> {
         submenu(text.screens, true, screens(settings, context, text)),
         submenu(text.opacity, true, choices(&Opacity::ALL, settings.opacity, |o| format!("{}%", o.percent()), Change::Opacity)),
         command(text.clear_snow, Action::ClearSnow, true),
+        command(text.send_snowplough, Action::SendSnowplough, true),
         Item::Separator,
         toggle(text.behind_windows, behind, Change::BehindWindows, true),
         toggle(text.keep_windows_clear, settings.keep_windows_clear, Change::KeepWindowsClear, true),
         toggle(text.snowballs, settings.snowballs, Change::Snowballs, true),
+        toggle(text.plough_taskbar, settings.plough_taskbar, Change::PloughTaskbar, true),
         toggle(text.melt, settings.melt, Change::Melt, true),
         toggle(text.pause_on_battery, settings.pause_on_battery, Change::PauseOnBattery, true),
         toggle(text.show_over_full_screen, settings.show_over_full_screen, Change::ShowOverFullScreen, !behind),
@@ -196,9 +199,11 @@ mod tests {
                 "Screens",
                 "Opacity",
                 "Clear snow",
+                "Send snowplough",
                 "Behind windows",
                 "Keep windows clear",
                 "Snowballs",
+                "Plough the taskbar",
                 "Melt",
                 "Pause on battery",
                 "Show over full screen",
@@ -215,6 +220,8 @@ mod tests {
         let menu = build(&Settings::default(), &context(Language::Russian));
         let labels = labels(&menu);
         assert!(labels.contains(&"Снежки"));
+        assert!(labels.contains(&"Чистить панель задач"));
+        assert!(labels.contains(&"Вызвать снегоочиститель"));
         assert_eq!(labels[0], "Снегопад");
         assert_eq!(labels.last(), Some(&"Выход"));
         assert!(labels.iter().all(|label| !label.contains("Quit")));
@@ -228,6 +235,7 @@ mod tests {
         assert!(state(find(&menu, "None")).0);
         assert!(state(find(&menu, "100%")).0);
         assert_eq!(state(find(&menu, "Snowballs")), (true, true));
+        assert_eq!(state(find(&menu, "Plough the taskbar")), (true, true));
         assert_eq!(state(find(&menu, "Melt")), (true, true));
         assert_eq!(state(find(&menu, "Open at login")), (true, true));
         assert_eq!(state(find(&menu, "Behind windows")), (false, true));
@@ -250,12 +258,20 @@ mod tests {
     #[test]
     fn choosing_an_item_asks_for_the_opposite_of_its_state() {
         let menu = build(&Settings::default(), &context(Language::English));
+        let Item::Command { action, .. } = find(&menu, "Send snowplough") else { panic!() };
+        assert_eq!(action, &Action::SendSnowplough);
+        let Item::Command { action, .. } = find(&menu, "Plough the taskbar") else { panic!() };
+        assert_eq!(action, &Action::Change(Change::PloughTaskbar(false)));
         let Item::Command { action, .. } = find(&menu, "Snowballs") else { panic!() };
         assert_eq!(action, &Action::Change(Change::Snowballs(false)));
         let mut settings = Settings::default();
         settings.apply(&Change::Snowballs(false));
+        settings.apply(&Change::PloughTaskbar(false));
         let changed = build(&settings, &context(Language::English));
         assert_eq!(state(find(&changed, "Snowballs")), (false, true));
+        assert_eq!(state(find(&changed, "Plough the taskbar")), (false, true));
+        let Item::Command { action, .. } = find(&changed, "Plough the taskbar") else { panic!() };
+        assert_eq!(action, &Action::Change(Change::PloughTaskbar(true)));
         let Item::Command { action, .. } = find(&changed, "Snowballs") else { panic!() };
         assert_eq!(action, &Action::Change(Change::Snowballs(true)));
         let Item::Command { action, .. } = find(&menu, "Melt") else { panic!() };
