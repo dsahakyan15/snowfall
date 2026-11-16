@@ -100,40 +100,49 @@ float4 spriteFragment(SpriteOut i) : SV_Target {
         float lit = saturate(dot(float3(q, z), normalize(float3(-0.5, 0.65, 1.0))));
         float3 color = lerp(float3(0.72, 0.80, 0.90), float3(0.985, 0.992, 1.0), 0.4 + 0.6 * lit);
         color = lerp(color, float3(0.64, 0.76, 0.88), smoothstep(0.88, 1.0, r) * 0.3);
-        float c = cos(i.spin), s = sin(i.spin);
+        float spin = i.tint.a < 0.0 ? 0.0 : i.spin;
+        float c = cos(spin), s = sin(spin);
         float2 turned = float2(c * q.x + s * q.y, -s * q.x + c * q.y);
         float2 cell = floor(turned * 5.0);
         float2 spot = frac(turned * 5.0) - 0.5;
         float dimple = (1.0 - smoothstep(0.04, 0.19, length(spot))) * step(0.73, hash(cell));
         color -= dimple * 0.055 * (1.0 - smoothstep(0.75, 1.0, r));
+        float2 detail = float2(q.x * (i.tint.a < 0.0 ? i.spin : 1.0), q.y);
         // Original procedural Snowman details, fixed in points and antialiased with derivatives.
         // Kind 2 is the middle ball; kind 3 is the head. No time-dependent idle animation.
         if (i.ball > 1.5 && i.ball < 2.5) {
-            float buttons = min(length(q - float2(0.0, 0.35)), min(length(q - float2(0.0, -0.03)), length(q - float2(0.0, -0.41))));
+            float buttons = min(length(detail - float2(0.0, 0.35)), min(length(detail - float2(0.0, -0.03)), length(detail - float2(0.0, -0.41))));
             float coal = 1.0 - smoothstep(0.085 - aa, 0.085 + aa, buttons);
             color = lerp(color, float3(0.10, 0.13, 0.17) + lit * 0.055, coal);
             // A broad collar at the head/middle join and a softly rounded hanging end.
-            float band = max(abs(q.x) - 0.66, abs(q.y - 0.98) - 0.13);
-            float2 tailPoint = q - float2(0.36, 0.61);
+            float band = max(abs(detail.x) - 0.66, abs(detail.y - 0.98) - 0.13);
+            float2 tailPoint = detail - float2(0.36, 0.61);
             float tail = length(max(abs(tailPoint) - float2(0.105, 0.35), 0.0)) - 0.035;
             float scarf = 1.0 - smoothstep(-aa, aa, min(band, tail));
-            float stripe = smoothstep(0.07, 0.09, abs(frac((q.y + q.x * 0.16) * 6.0) - 0.5));
-            float stitch = sin(q.x * 95.0 + abs(frac(q.y * 32.0) - 0.5) * 5.0) * 0.035;
+            float stripe = smoothstep(0.07, 0.09, abs(frac((detail.y + detail.x * 0.16) * 6.0) - 0.5));
+            float stitch = sin(detail.x * 95.0 + abs(frac(detail.y * 32.0) - 0.5) * 5.0) * 0.035;
             float3 wool = lerp(float3(0.92, 0.22, 0.22), float3(0.65, 0.045, 0.09), stripe) + stitch;
             color = lerp(color, wool * (0.86 + lit * 0.14), scarf);
             body = max(body, scarf);
         }
         if (i.ball > 2.5) {
-            float eyes = min(length(q - float2(-0.28, 0.26)), length(q - float2(0.28, 0.26)));
+            float eyes = min(length(detail - float2(-0.28, 0.26)), length(detail - float2(0.28, 0.26)));
             float coal = 1.0 - smoothstep(0.095 - aa, 0.095 + aa, eyes);
             color = lerp(color, float3(0.09, 0.12, 0.16), coal);
-            float glint = min(length(q - float2(-0.30, 0.29)), length(q - float2(0.26, 0.29)));
+            float glint = min(length(detail - float2(-0.30, 0.29)), length(detail - float2(0.26, 0.29)));
             color = lerp(color, float3(0.7, 0.77, 0.85), (1.0 - smoothstep(0.018, 0.04, glint)) * coal);
-            float nx = q.x + 0.08;
-            float noseEdge = max(max(-nx, nx - 0.88), abs(q.y + 0.10) - 0.17 * (1.0 - nx / 0.88));
+            float nx = detail.x + 0.08;
+            float noseEdge = max(max(-nx, nx - 0.88), abs(detail.y + 0.10) - 0.17 * (1.0 - nx / 0.88));
             float carrot = 1.0 - smoothstep(-aa, aa, noseEdge);
             float ridges = sin(nx * 38.0) * 0.035;
-            color = lerp(color, lerp(float3(0.90, 0.28, 0.035), float3(1.0, 0.61, 0.12), saturate(q.y * 3.0 + 0.8)) + ridges, carrot);
+            color = lerp(color, lerp(float3(0.90, 0.28, 0.035), float3(1.0, 0.61, 0.12), saturate(detail.y * 3.0 + 0.8)) + ridges, carrot);
+        }
+        // A soft bite heals in place without changing the Snowman's snow area.
+        if (i.tint.a < 0.0 && i.lump > 0.0) {
+            float dentRadius = i.tint.z * i.lump;
+            float bite = 1.0 - smoothstep(dentRadius * 0.45, dentRadius, length(q - i.tint.xy));
+            color = lerp(color, float3(0.48, 0.59, 0.72), bite * i.lump * 0.65);
+            body *= 1.0 - bite * i.lump * 0.7;
         }
         float2 contact = float2(q.x / 0.9, (q.y + 0.97) / 0.16);
         float shadow = exp(-dot(contact, contact) * 2.0) * 0.2 * (1.0 - body);

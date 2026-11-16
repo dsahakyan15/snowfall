@@ -6,7 +6,7 @@ use std::ops::Range;
 
 use crate::geometry::{Rect, V2, smoothstep};
 use crate::layer::{SnowLayer, sample};
-use crate::play::{SnowPlay, Snowball, SnowballId, SnowballState, Snowman, Surface};
+use crate::play::{FIGHT_BALL_RADIUS, SnowPlay, Snowball, SnowballId, SnowballState, Snowman, Surface};
 
 pub type WindowId = isize;
 
@@ -148,7 +148,7 @@ pub struct Sprite {
     pub size: f32,
     pub alpha: f32,
     pub soft: f32,
-    /// How much of the tint shows instead of snow white.
+    /// How much of the tint shows instead of snow white; -1 marks a Snowman.
     pub tint_amount: f32,
     pub tint: [f32; 3],
     /// Gives a lump of snow its ragged outline and tumble; zero for a round flake.
@@ -157,6 +157,9 @@ pub struct Sprite {
     pub ball: f32,
     pub angle: f32,
 }
+
+// Snowman sprites reuse angle for facing, lump for dent lifetime (0..1), and tint
+// for the dent's direction (xy) and original radius (z), relative to its circle.
 
 /// A Pile as drawn, lent by the screen whose snow keeps it to a screen it reaches into, as a window straddling two
 /// displays does: drawn there, but not simulated.
@@ -270,21 +273,21 @@ struct Mote {
     life: f32,
 }
 
-struct Random(u64);
+pub(crate) struct Random(u64);
 
 impl Random {
     fn new() -> Random {
         Random(RandomState::new().build_hasher().finish().max(1))
     }
 
-    fn next(&mut self) -> f32 {
+    pub(crate) fn next(&mut self) -> f32 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;
         (self.0 >> 40) as f32 / (1u32 << 24) as f32
     }
 
-    fn range(&mut self, lower: f32, upper: f32) -> f32 {
+    pub(crate) fn range(&mut self, lower: f32, upper: f32) -> f32 {
         lower + (upper - lower) * self.next()
     }
 }
@@ -461,6 +464,9 @@ impl SnowSimulation {
 
     /// Turning Snowballs off returns their snow to their supporting Piles.
     pub fn set_snowballs(&mut self, on: bool) {
+        if !on {
+            self.play.clear_fight();
+        }
         if !on && !self.play.is_empty() {
             self.return_snowballs();
             self.air.windows_changed = true;
@@ -474,6 +480,11 @@ impl SnowSimulation {
 
     pub fn snowmen(&self) -> &[Snowman] {
         &self.play.snowmen
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fight_turn(&self) -> Option<([SnowballId; 2], u8)> {
+        self.play.fight_turn()
     }
 
     pub fn snowman_at(&self, point: V2) -> Option<SnowballId> {
@@ -490,6 +501,7 @@ impl SnowSimulation {
 
     pub fn take_snowman(&mut self, id: SnowballId) -> Option<Snowman> {
         let i = self.play.snowmen.iter().position(|m| m.id == id)?;
+        self.play.disturb(id);
         self.air.windows_changed = true;
         Some(self.play.snowmen.remove(i))
     }
@@ -572,6 +584,7 @@ impl SnowSimulation {
     }
 
     fn return_snowballs(&mut self) {
+        self.play.clear_fight();
         if self.play.is_empty() {
             return;
         }
@@ -608,7 +621,7 @@ impl SnowSimulation {
     }
 
     pub fn sprite_count(&self) -> usize {
-        self.air.flakes.len() + self.air.grains.len() + self.air.motes.len()
+        self.air.flakes.len() + self.air.grains.len() + self.air.motes.len() + self.play.projectiles.len() + self.play.puffs.len()
     }
 
     /// Floats the renderer needs per frame: each layer's surface and bed.
@@ -665,6 +678,9 @@ impl SnowSimulation {
         self.air.advance_motes(dt);
         self.settle(dt);
         self.advance_snowballs(dt);
+        if self.play.advance_fight(&self.layers, self.width, dt, GRAVITY, &mut self.air.random) {
+            self.air.heights_changed = true;
+        }
 
         self.spawn_flakes();
 
@@ -687,6 +703,7 @@ impl SnowSimulation {
         // The steady trickle off window corners is a few tiny grains at a time; they read fine at the calm rate.
         let flying = air.grains.len() > 24
             || air.slide_wind.abs() > 20.0
+            || self.play.fighting()
             || self.play.balls.iter().any(|ball| !matches!(ball.state, SnowballState::Resting { .. }))
             || self.play.active();
         self.pace = if pushed {
@@ -738,6 +755,10 @@ impl SnowSimulation {
                 size: radius * 2.0,
                 alpha: self.opacity,
                 ball: [1.0, 2.0, 3.0][i],
+                angle: man.facing,
+                tint_amount: -1.0,
+                tint: man.dents[i].map_or([0.0; 3], |d| [d.direction.x, d.direction.y, d.radius]),
+                lump: man.dents[i].map_or(0.0, |d| (d.remaining / 5.0).clamp(0.0, 1.0)),
                 ..Sprite::default()
             })
         });
@@ -782,7 +803,21 @@ impl SnowSimulation {
             Sprite { position: mote.position, size: mote.size * (1.0 + t), alpha: mote.alpha * fade, soft: 1.0, tint: [1.0; 3], ..Sprite::default() }
         });
         let mut count = 0;
-        for (slot, sprite) in buffer.iter_mut().zip(flakes.chain(grains).chain(motes)) {
+        let projectiles = self.play.projectiles.iter().map(|ball| Sprite {
+            position: ball.position,
+            size: FIGHT_BALL_RADIUS * 2.0,
+            alpha: self.opacity,
+            ball: 1.0,
+            ..Sprite::default()
+        });
+        let puffs = self.play.puffs.iter().map(|puff| Sprite {
+            position: puff.position,
+            size: puff.size,
+            alpha: (puff.remaining / puff.life).clamp(0.0, 1.0) * self.opacity,
+            soft: 0.3,
+            ..Sprite::default()
+        });
+        for (slot, sprite) in buffer.iter_mut().zip(flakes.chain(grains).chain(motes).chain(projectiles).chain(puffs)) {
             *slot = sprite;
             count += 1;
         }
@@ -842,6 +877,7 @@ impl SnowSimulation {
     /// Takes the Pile on window `id`'s Ledge out of this screen's snow, to carry it to another screen's, as when the
     /// window is dragged there. Snow kept for it out of sight comes too.
     pub fn take_pile(&mut self, id: WindowId) -> Option<SnowLayer> {
+        self.play.disturb_on(Surface::Ledge(id));
         // Held columns are known by index, which taking a Ledge out would shift.
         for li in self.air.held_layers.drain(..) {
             if let Some(layer) = self.layers.get_mut(li) {
@@ -1005,6 +1041,10 @@ impl SnowSimulation {
             seen.insert(surface.id);
 
             let li = if let Some(&li) = known.get(&surface.id) {
+                let ledge = &self.layers[li];
+                if ledge.origin != V2::new(left, top) || columns != ledge.count() {
+                    self.play.disturb_on(Surface::Ledge(surface.id));
+                }
                 let ledge = &mut self.layers[li];
                 if sliding && columns == ledge.count() {
                     self.air.pan(ledge, left, top);

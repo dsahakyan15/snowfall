@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::geometry::V2;
 use crate::layer::SnowLayer;
-use crate::simulation::WindowId;
+use crate::simulation::{Random, WindowId};
 
 const START_RADIUS: f32 = 6.0;
 const MAX_RADIUS: f32 = 40.0;
@@ -25,6 +25,13 @@ const WIND_PUSH: f32 = 0.2;
 const STACK_TOLERANCE: f32 = 1.1;
 const HOP_SPEED: f32 = 95.0;
 const HOP_GRAVITY: f32 = 500.0;
+pub(crate) const IDLE_BEFORE_FIGHT: f64 = 180.0;
+const THROW_INTERVAL: f32 = 1.15;
+const WIND_UP: f32 = 0.2;
+const FIGHT_THROWS: u8 = 9;
+pub(crate) const FIGHT_BALL_RADIUS: f32 = 5.5;
+const DENT_LIFE: f32 = 5.0;
+const MAX_FIGHT_PUFFS: usize = 128;
 
 /// Shared by screens so a ball keeps its identity when carried between simulations.
 static NEXT_ID: AtomicU32 = AtomicU32::new(1);
@@ -99,6 +106,12 @@ pub struct Snowman {
     pub state: SnowballState,
     pub hop_offset: f32,
     pub hop_velocity: f32,
+    /// Keeps looking toward the other Snowman after a fight.
+    pub facing: f32,
+    pub(crate) dents: [Option<Dent>; 3],
+    wind_up: f32,
+    idle_for: f64,
+    fight_hop: bool,
     support_origin: V2,
     grab_offset: V2,
 }
@@ -116,7 +129,9 @@ impl Snowman {
     pub fn circles(&self) -> [(V2, f32); 3] {
         let [a, b, c] = self.radii;
         let base = self.center + V2::new(0.0, self.hop_offset);
-        [(base, a), (base + V2::new(0.0, a + b), b), (base + V2::new(0.0, a + 2.0 * b + c), c)]
+        let squash = 1.0 - 0.12 * self.wind_up;
+        let lean = -self.facing * 4.0 * self.wind_up;
+        [(base, a), (base + V2::new(lean, a + b * squash), b * squash), (base + V2::new(lean * 1.5, a + (2.0 * b + c) * squash), c * squash)]
     }
 
     pub fn contains(&self, point: V2) -> bool {
@@ -127,6 +142,8 @@ impl Snowman {
         let mut base = self.base_ball();
         base.map_to(scale, offset);
         self.set_base(base);
+        self.idle_for = 0.0;
+        self.wind_up = 0.0;
     }
 
     fn base_ball(&self) -> Snowball {
@@ -153,20 +170,61 @@ impl Snowman {
     }
 
     fn parts(&self) -> [Snowball; 3] {
-        self.circles().map(|(center, radius)| Snowball { center, radius, ..self.base_ball() })
+        let circles = self.circles();
+        std::array::from_fn(|i| Snowball { center: circles[i].0, radius: self.radii[i], ..self.base_ball() })
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Dent {
+    pub direction: V2,
+    pub radius: f32,
+    pub remaining: f32,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct FightBall {
+    pub position: V2,
+    pub velocity: V2,
+    target: SnowballId,
+}
+
+pub(crate) struct FightPuff {
+    pub position: V2,
+    velocity: V2,
+    pub size: f32,
+    pub remaining: f32,
+    pub life: f32,
+}
+
+#[derive(Clone, Copy)]
+struct Fight {
+    pair: [SnowballId; 2],
+    elapsed: f32,
+    throws: u8,
 }
 
 pub(crate) struct SnowPlay {
     pub balls: Vec<Snowball>,
     pub snowmen: Vec<Snowman>,
     pub enabled: bool,
+    fight: Option<Fight>,
+    pub projectiles: Vec<FightBall>,
+    pub puffs: Vec<FightPuff>,
     next_spawn: f64,
 }
 
 impl SnowPlay {
     pub fn new() -> Self {
-        Self { balls: Vec::new(), snowmen: Vec::new(), enabled: true, next_spawn: 0.0 }
+        Self {
+            balls: Vec::new(),
+            snowmen: Vec::new(),
+            enabled: true,
+            fight: None,
+            projectiles: Vec::with_capacity(2),
+            puffs: Vec::with_capacity(MAX_FIGHT_PUFFS),
+            next_spawn: 0.0,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -183,6 +241,229 @@ impl SnowPlay {
                 .snowmen
                 .iter()
                 .any(|m| matches!(m.state, SnowballState::Held | SnowballState::Falling) || m.hop_offset > 0.0 || m.hop_velocity != 0.0)
+    }
+
+    pub fn fighting(&self) -> bool {
+        self.fight.is_some()
+            || !self.projectiles.is_empty()
+            || !self.puffs.is_empty()
+            || self.snowmen.iter().any(|m| m.dents.iter().any(Option::is_some))
+    }
+
+    #[cfg(test)]
+    pub fn fight_turn(&self) -> Option<([SnowballId; 2], u8)> {
+        self.fight.map(|f| (f.pair, f.throws))
+    }
+
+    /// Being moved or touched starts the wait for another fight over again.
+    pub fn disturb(&mut self, id: SnowballId) {
+        if self.fight.is_some_and(|f| f.pair.contains(&id)) {
+            self.end_fight();
+        }
+        if let Some(man) = self.snowmen.iter_mut().find(|m| m.id == id) {
+            man.idle_for = 0.0;
+            man.wind_up = 0.0;
+        }
+    }
+
+    pub fn disturb_on(&mut self, on: Surface) {
+        if self.fight.is_some_and(|f| self.snowmen.iter().any(|m| f.pair.contains(&m.id) && m.surface() == Some(on))) {
+            self.end_fight();
+        }
+        for man in self.snowmen.iter_mut().filter(|m| m.surface() == Some(on)) {
+            man.idle_for = 0.0;
+            man.wind_up = 0.0;
+        }
+    }
+
+    fn end_fight(&mut self) {
+        if let Some(fight) = self.fight.take() {
+            for man in self.snowmen.iter_mut().filter(|m| fight.pair.contains(&m.id)) {
+                man.idle_for = 0.0;
+                man.wind_up = 0.0;
+            }
+        }
+        while let Some(ball) = self.projectiles.pop() {
+            self.puff(ball.position, ball.velocity, 14);
+        }
+    }
+
+    pub fn clear_fight(&mut self) {
+        self.end_fight();
+        self.puffs.clear();
+    }
+
+    /// Two undisturbed Snowmen pick the nearest partner on this screen.
+    pub fn advance_fight(&mut self, layers: &[SnowLayer], width: f32, dt: f32, gravity: f32, random: &mut Random) -> bool {
+        let changed = self.fighting();
+        for man in &mut self.snowmen {
+            for dent in &mut man.dents {
+                if let Some(d) = dent {
+                    d.remaining -= dt;
+                    if d.remaining <= 0.0 {
+                        *dent = None;
+                    }
+                }
+            }
+            if matches!(man.state, SnowballState::Resting { .. }) && man.hop_offset == 0.0 && man.hop_velocity == 0.0 {
+                man.idle_for += dt as f64;
+            } else {
+                man.idle_for = 0.0;
+            }
+        }
+        for puff in &mut self.puffs {
+            puff.position += puff.velocity * dt + V2::new(0.0, -0.5 * gravity * dt * dt);
+            puff.velocity.y -= gravity * dt;
+            puff.remaining -= dt;
+        }
+        self.puffs.retain(|p| p.remaining > 0.0);
+
+        if self.fight.is_some_and(|f| {
+            f.pair.iter().any(|id| {
+                !self.snowmen.iter().any(|m| {
+                    m.id == *id && matches!(m.state, SnowballState::Resting { .. }) && (m.fight_hop || (m.hop_offset == 0.0 && m.hop_velocity == 0.0))
+                })
+            })
+        }) {
+            self.end_fight();
+        }
+        if !self.enabled {
+            return changed;
+        }
+        if self.fight.is_none() {
+            let mut nearest = None;
+            let mut distance = f32::INFINITY;
+            for (i, a) in self.snowmen.iter().enumerate().filter(|(_, m)| m.idle_for >= IDLE_BEFORE_FIGHT) {
+                for b in self.snowmen[i + 1..].iter().filter(|m| m.idle_for >= IDLE_BEFORE_FIGHT) {
+                    let apart = (a.center - b.center).length_squared();
+                    if apart < distance {
+                        nearest = Some([a.id, b.id]);
+                        distance = apart;
+                    }
+                }
+            }
+            if let Some(pair) = nearest {
+                let a = self.snowmen.iter().find(|m| m.id == pair[0]).unwrap().center;
+                let b = self.snowmen.iter().find(|m| m.id == pair[1]).unwrap().center;
+                let facing = if b.x >= a.x { 1.0 } else { -1.0 };
+                for man in &mut self.snowmen {
+                    if man.id == pair[0] {
+                        man.facing = facing;
+                    } else if man.id == pair[1] {
+                        man.facing = -facing;
+                    }
+                }
+                self.fight = Some(Fight { pair, elapsed: 0.0, throws: 0 });
+                // The first wind-up begins now, rather than spending the last idle frame on a throw.
+                return true;
+            }
+            return changed;
+        }
+
+        let steps = (dt / (1.0 / 240.0)).ceil().max(1.0) as usize;
+        let step = dt / steps as f32;
+        for _ in 0..steps {
+            let Some(mut fight) = self.fight else { break };
+            fight.elapsed += step;
+            for man in self.snowmen.iter_mut().filter(|m| fight.pair.contains(&m.id)) {
+                man.wind_up = 0.0;
+            }
+            if fight.throws < FIGHT_THROWS {
+                let t = fight.elapsed - fight.throws as f32 * THROW_INTERVAL;
+                let thrower = fight.pair[fight.throws as usize % 2];
+                if t >= WIND_UP {
+                    let target = fight.pair[(fight.throws as usize + 1) % 2];
+                    self.throw(thrower, target, gravity, random);
+                    fight.throws += 1;
+                } else if t >= 0.0 {
+                    let man = self.snowmen.iter_mut().find(|m| m.id == thrower).unwrap();
+                    man.wind_up = (PI * t / WIND_UP).sin();
+                }
+            }
+            self.fight = Some(fight);
+            self.fly_fight_balls(layers, width, step, gravity, random);
+            if fight.throws == FIGHT_THROWS && self.projectiles.is_empty() {
+                self.end_fight();
+            }
+        }
+        true
+    }
+
+    fn throw(&mut self, thrower: SnowballId, target: SnowballId, gravity: f32, random: &mut Random) {
+        let man = self.snowmen.iter().find(|m| m.id == thrower).unwrap();
+        let (middle, radius) = man.circles()[1];
+        let position = middle + V2::new(man.facing * (radius + FIGHT_BALL_RADIUS), 0.0);
+        let target_man = self.snowmen.iter().find(|m| m.id == target).unwrap();
+        let circle = if random.next() < 0.65 { 1 } else { 2 };
+        let mut aim = target_man.circles()[circle].0;
+        if random.next() < 0.3 {
+            aim.x += random.range(-70.0, 70.0);
+        }
+        let flight = random.range(0.85, 1.1);
+        let velocity = (aim - position) / flight + V2::new(0.0, 0.5 * gravity * flight);
+        self.projectiles.push(FightBall { position, velocity, target });
+    }
+
+    fn fly_fight_balls(&mut self, layers: &[SnowLayer], width: f32, dt: f32, gravity: f32, random: &mut Random) {
+        let mut i = 0;
+        while i < self.projectiles.len() {
+            let ball = &mut self.projectiles[i];
+            let from = ball.position;
+            ball.position += ball.velocity * dt + V2::new(0.0, -0.5 * gravity * dt * dt);
+            ball.velocity.y -= gravity * dt;
+            let ball = *ball;
+            let hit = self.snowmen.iter().position(|m| m.id == ball.target).and_then(|mi| {
+                self.snowmen[mi].circles().iter().enumerate().find_map(|(ci, &(center, radius))| {
+                    ((ball.position - center).length_squared() <= (radius + FIGHT_BALL_RADIUS).powi(2)).then_some((mi, ci, center, radius))
+                })
+            });
+            let landed = ball.velocity.y < 0.0
+                && layers.iter().enumerate().any(|(li, layer)| {
+                    layer.index(ball.position.x).is_some_and(|column| {
+                        let top = layer.surface(column);
+                        (li == 0 || layer.heights[column] > 0.0)
+                            && layer.visible[column]
+                            && from.y - FIGHT_BALL_RADIUS >= top
+                            && ball.position.y - FIGHT_BALL_RADIUS <= top
+                    })
+                });
+            if let Some((mi, ci, center, radius)) = hit {
+                let delta = ball.position - center;
+                let direction = delta / delta.length().max(0.001);
+                let man = &mut self.snowmen[mi];
+                man.hop_velocity = HOP_SPEED;
+                man.fight_hop = true;
+                man.dents[ci] = Some(Dent { direction, radius: random.range(0.18, 0.28), remaining: DENT_LIFE });
+                self.puff(center + direction * radius, ball.velocity, 26);
+            } else if !landed
+                && ball.position.x >= -FIGHT_BALL_RADIUS
+                && ball.position.x <= width + FIGHT_BALL_RADIUS
+                && ball.position.y >= -FIGHT_BALL_RADIUS
+            {
+                // The top stays open, so an arc above the screen can return to its target.
+                i += 1;
+                continue;
+            } else {
+                self.puff(ball.position, ball.velocity, 14);
+            }
+            self.projectiles.swap_remove(i);
+        }
+    }
+
+    fn puff(&mut self, position: V2, velocity: V2, count: usize) {
+        let direction = velocity / velocity.length().max(1.0);
+        for i in 0..count.min(MAX_FIGHT_PUFFS - self.puffs.len()) {
+            let angle = i as f32 * 2.399963;
+            let spread = V2::new(angle.cos(), angle.sin());
+            let life = 0.6 + (i * 7 % 13) as f32 / 12.0 * 0.7;
+            self.puffs.push(FightPuff {
+                position,
+                velocity: direction * 65.0 + spread * (35.0 + (i * 17 % 71) as f32) + V2::new(0.0, 90.0),
+                size: 2.0 + (i % 4) as f32 * 0.65,
+                remaining: life,
+                life,
+            });
+        }
     }
 
     /// Takes over the cursor's carving only where it is rolling a ball.
@@ -243,6 +524,7 @@ impl SnowPlay {
     /// With the pointer gone, friction brings rolling to an exact stop. Resting balls only follow their support.
     pub fn advance(&mut self, layer: &mut SnowLayer, on: Surface, dt: f32, clock: f64) -> bool {
         let mut changed = false;
+        let mut disturbed = false;
         for ball in self.balls.iter_mut().filter(|ball| ball.surface() == Some(on) && ball.stacked_on.is_none()) {
             let previous = ball.center;
             ball.center += layer.origin - ball.support_origin;
@@ -268,17 +550,26 @@ impl SnowPlay {
             let mut base = man.base_ball();
             seat(&mut base, layer);
             man.set_base(base);
+            if (man.center - before).length_squared() > 0.0001 {
+                man.idle_for = 0.0;
+                man.wind_up = 0.0;
+                disturbed |= self.fight.is_some_and(|f| f.pair.contains(&man.id));
+            }
             if dt > 0.0 && (man.hop_velocity != 0.0 || man.hop_offset > 0.0) {
                 man.hop_offset += man.hop_velocity * dt - 0.5 * HOP_GRAVITY * dt * dt;
                 man.hop_velocity -= HOP_GRAVITY * dt;
                 if man.hop_offset <= 0.0 {
                     man.hop_offset = 0.0;
                     man.hop_velocity = 0.0;
+                    man.fight_hop = false;
                 }
                 changed = true;
             }
             // Like resting balls, ignore sub-pixel drift while a shaken Ledge settles.
             changed |= (man.center - before).length_squared() > 0.0001;
+        }
+        if disturbed {
+            self.end_fight();
         }
         self.follow_stacks();
         changed
@@ -322,6 +613,11 @@ impl SnowPlay {
                 state: bottom.state,
                 hop_offset: 0.0,
                 hop_velocity: 0.0,
+                facing: 1.0,
+                dents: [None; 3],
+                wind_up: 0.0,
+                idle_for: 0.0,
+                fight_hop: false,
                 support_origin: bottom.support_origin,
                 grab_offset: V2::ZERO,
             });
@@ -334,7 +630,9 @@ impl SnowPlay {
         if speed <= HARD_HIT {
             return;
         }
+        self.disturb_on(on);
         for man in self.snowmen.iter_mut().filter(|m| m.surface() == Some(on)) {
+            man.fight_hop = false;
             if man.hop_offset == 0.0 && man.hop_velocity == 0.0 {
                 man.hop_velocity = HOP_SPEED;
             }
@@ -343,6 +641,7 @@ impl SnowPlay {
 
     /// A disappearing or shedding Ledge lets its balls fall from where they were.
     pub fn shed_on(&mut self, on: Surface, velocity: V2) {
+        self.disturb_on(on);
         for ball in self.balls.iter_mut().filter(|ball| ball.surface() == Some(on)) {
             ball.state = SnowballState::Falling;
             ball.velocity = velocity;
@@ -371,6 +670,7 @@ impl SnowPlay {
             man.grab_offset = man.center - point;
             man.state = SnowballState::Held;
             man.velocity = V2::ZERO;
+            self.disturb(id);
             return true;
         }
         let Some(ball) = self.balls.iter_mut().find(|ball| ball.id == id) else { return false };
