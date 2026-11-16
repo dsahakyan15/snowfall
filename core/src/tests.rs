@@ -4,6 +4,7 @@ use crate::geometry::{Rect, V2};
 
 use crate::layer::SnowLayer;
 use crate::play::{SnowPlay, Snowball, SnowballState, Surface};
+use crate::plough::PloughKind;
 use crate::simulation::{Pace, SnowSimulation, Snowfall, Sprite, Wind, WindowSurface};
 
 const DT: f32 = 1.0 / 60.0;
@@ -2099,36 +2100,66 @@ fn plough_scene(seed: u64, depth: f32) -> SnowSimulation {
 }
 
 #[test]
-fn snowplough_scrapes_both_ways_and_only_removes_snow_pushed_off_the_edge() {
-    let mut directions = Vec::new();
-    for seed in [1, 1 << 33] {
-        let mut simulation = plough_scene(seed, 36.0);
+fn snowplough_kinds_and_directions_are_chosen_separately() {
+    for (seed, direction, kind) in
+        [(1, 1.0, PloughKind::Blade), (1 << 33, -1.0, PloughKind::Blade), (2 << 33, 1.0, PloughKind::Blower), (3 << 33, -1.0, PloughKind::Blower)]
+    {
+        let mut simulation = plough_scene(seed, 26.0);
+        simulation.send_snowplough();
+        let plough = simulation.snowplough().unwrap();
+        assert_eq!(plough.direction, direction);
+        assert_eq!(plough.kind, kind);
+    }
+}
+
+#[test]
+fn snowplough_spills_excess_snow_and_finishes_its_particles_after_the_pass() {
+    for seed in [1, 1 << 33, 2 << 33, 3 << 33] {
+        let mut simulation = plough_scene(seed, 60.0);
         let before = simulation.snow_area() as f64;
         simulation.send_snowplough();
-        let direction = simulation.snowplough().unwrap().direction;
-        directions.push(direction);
         assert!(!simulation.is_empty());
         assert_eq!(simulation.pace(), Pace::Lively);
         let start = simulation.snowplough().unwrap().x;
         simulation.send_snowplough();
         assert_eq!(simulation.snowplough().unwrap().x, start);
         let mut saw_mound = false;
+        let mut saw_spill = false;
+        let mut sprites = [Sprite::default(); 160];
         for frame in 0..1000 {
             assert!(simulation.step(DT, AWAY));
             let area = simulation.snow_area() as f64;
             assert!((before - area - simulation.ploughed_area()).abs() < 1.0, "unaccounted snow: {before} - {area} - {}", simulation.ploughed_area());
             let Some(plough) = simulation.snowplough() else { break };
             assert_eq!(simulation.pace(), Pace::Lively);
-            saw_mound |= plough.snow_height > 30.0 && plough.carried > 0.0;
-            assert!(plough.snow_height <= crate::plough::MOUND_MAX, "excess snow must be carried instead of raising the mound");
-            if (direction > 0.0 && plough.blade() < simulation.width() * 0.5) || (direction < 0.0 && plough.blade() > simulation.width() * 0.5) {
-                assert_eq!(simulation.ploughed_area(), 0.0, "snow must stay in the Pile or load until the blade reaches the edge");
+            let cap = plough.kind.mound_cap();
+            saw_mound |= plough.snow_height > cap - 0.1;
+            assert!(plough.snow_height <= cap);
+            assert!(simulation.plough_spill_count() <= 160);
+            if simulation.plough_spill_count() > 0 {
+                assert!(simulation.ploughed_area() > 0.0, "spill must count as removed snow immediately");
+                let count = simulation.write_sprites(&mut sprites);
+                assert_eq!(count, simulation.plough_spill_count());
+                assert!(sprites[..count].iter().all(|s| s.ball == 1.0 && s.alpha >= 0.0 && s.alpha <= 1.0));
+                assert!(sprites[..count].iter().all(|s| simulation.snowball_at(s.position).is_none()));
+                saw_spill = true;
             }
             assert!(frame < 999, "the Snowplough never left");
         }
-        assert!(saw_mound, "snow must build up in front of the blade");
+        assert!(saw_mound && saw_spill, "snow must build up and visibly leave the Ground");
         assert!(simulation.snowplough().is_none());
         assert!(simulation.snow_area() / simulation.width() < 2.0);
+        if seed == 2 << 33 || seed == 3 << 33 {
+            assert!(simulation.plough_spill_count() > 0, "the final stream should outlive the blower");
+        }
+        for _ in 0..180 {
+            if simulation.plough_spill_count() == 0 {
+                break;
+            }
+            assert_eq!(simulation.pace(), Pace::Lively);
+            simulation.step(DT, AWAY);
+        }
+        assert_eq!(simulation.plough_spill_count(), 0);
         assert_eq!(simulation.pace(), Pace::Calm);
         assert!(!simulation.step(DT, AWAY));
         // Sending again bypasses the cooldown, even with automatic visits off.
@@ -2136,12 +2167,73 @@ fn snowplough_scrapes_both_ways_and_only_removes_snow_pushed_off_the_edge() {
         simulation.send_snowplough();
         assert!(simulation.snowplough().is_some());
     }
-    assert_eq!(directions, [1.0, -1.0]);
+}
+
+#[test]
+fn snowplough_accounts_for_ground_and_whole_snow_play_exactly() {
+    let man = build_snowman(&mut bare_play(), 0.0);
+    for depth in [26.0, 60.0] {
+        for kind in [PloughKind::Blade, PloughKind::Blower] {
+            for direction in [1.0, -1.0] {
+                let mut ground = SnowLayer::new(V2::ZERO, 641, 2.0, 40.0, false, (0.0, 0.0));
+                ground.right = 1280.0;
+                for i in 0..ground.count() {
+                    ground.set(i, depth);
+                }
+                let mut play = SnowPlay::new();
+                let mut ball = flight_ball(V2::new(300.0, 15.0), 15.0);
+                ball.state = SnowballState::Resting { on: Surface::Ground };
+                play.balls.push(ball);
+                let mut man = man;
+                man.center.x = 650.0;
+                play.snowmen.push(man);
+                let area = |ground: &SnowLayer, play: &SnowPlay| {
+                    ground.heights.iter().map(|&h| h as f64 * ground.column_width as f64).sum::<f64>()
+                        + play.balls.iter().map(|b| b.area() as f64).sum::<f64>()
+                        + play.snowmen.iter().map(|m| m.area() as f64).sum::<f64>()
+                };
+                let before = area(&ground, &play);
+                let mut plough = crate::plough::Snowplough {
+                    kind,
+                    x: if direction > 0.0 { -144.0 } else { 1424.0 },
+                    direction,
+                    distance: 0.0,
+                    elapsed: 0.0,
+                    snow_height: 0.0,
+                    mound: Vec::new(),
+                };
+                let mut removed = 0.0;
+                for _ in 0..800 {
+                    removed += plough.advance(&mut ground, DT);
+                    removed += play.plough(&plough, &ground, 1280.0);
+                    assert_eq!(before, area(&ground, &play) + removed, "snow changed: {depth}, {kind:?}, {direction}");
+                    assert!(play.snowmen.iter().all(|m| m.radii == man.radii));
+                }
+                assert!(play.balls.is_empty() && play.snowmen.is_empty());
+                assert!(area(&ground, &play) / 1280.0 < 2.0);
+            }
+        }
+    }
+}
+
+#[test]
+fn clear_snow_removes_the_snowplough_spill_too() {
+    for seed in [1, 2 << 33] {
+        let mut simulation = plough_scene(seed, 60.0);
+        simulation.send_snowplough();
+        run(&mut simulation, 1.0, AWAY);
+        assert!(simulation.plough_spill_count() > 0);
+        simulation.blow_away(1.0, true);
+        assert!(simulation.snowplough().is_none());
+        assert_eq!(simulation.plough_spill_count(), 0);
+        run(&mut simulation, 4.0, AWAY);
+        assert!(simulation.is_empty());
+    }
 }
 
 #[test]
 fn snowplough_pushes_ground_snow_play_whole_and_leaves_ledges_alone() {
-    for seed in [1, 1 << 33] {
+    for seed in [1, 1 << 33, 2 << 33, 3 << 33] {
         let mut simulation = snowball_pile(20.0);
         let ledge_man = build_snowman(&mut simulation, 300.0);
         let mut source = bare_play();
@@ -2185,7 +2277,7 @@ fn snowplough_pushes_ground_snow_play_whole_and_leaves_ledges_alone() {
 
 #[test]
 fn snow_play_pushed_by_the_snowplough_queues_up_instead_of_overlapping() {
-    for seed in [1, 1 << 33] {
+    for seed in [1, 1 << 33, 2 << 33, 3 << 33] {
         let mut simulation = plough_scene(seed, 26.0);
         for x in [600.0, 700.0] {
             let mut man = build_snowman(&mut bare_play(), 0.0);
@@ -2229,7 +2321,7 @@ fn assert_pushed_on_mound(simulation: &SnowSimulation, center: V2, radius: f32) 
     let at = (center.x - ground.origin.x) / 2.0 - 0.5;
     let surface = ground.origin.y + crate::layer::sample(levels, at);
     assert!((center.y - radius - surface).abs() < 0.001, "pushed snow play must sit on the local mound surface");
-    assert!(surface - ground.origin.y <= 26.0 + crate::plough::MOUND_MAX + 0.001);
+    assert!(surface - ground.origin.y <= 26.0_f32.max(plough.kind.mound_cap()) + 0.001);
 }
 
 #[test]
@@ -2342,8 +2434,15 @@ fn snowplough_leaves_held_falling_and_ledge_snow_play_untouched() {
         man.center.x = 520.0;
         play.snowmen.push(man);
         let ground = SnowLayer::new(V2::ZERO, 641, 2.0, 40.0, false, (0.0, 0.0));
-        let plough =
-            crate::plough::Snowplough { x: 400.0, direction: 1.0, distance: 544.0, elapsed: 4.0, snow_height: 0.0, carried: 0.0, mound: Vec::new() };
+        let plough = crate::plough::Snowplough {
+            kind: PloughKind::Blade,
+            x: 400.0,
+            direction: 1.0,
+            distance: 544.0,
+            elapsed: 4.0,
+            snow_height: 0.0,
+            mound: Vec::new(),
+        };
         assert_eq!(play.plough(&plough, &ground, 1280.0), 0.0);
         assert_eq!(play.balls[0].state, state);
         assert_eq!(play.balls[0].center, ball.center);

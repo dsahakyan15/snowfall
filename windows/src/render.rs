@@ -291,6 +291,7 @@ impl Surface {
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
             context.Map(sprite_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut mapped))?;
             let sprites = simulation.write_sprites(std::slice::from_raw_parts_mut(mapped.pData.cast::<Sprite>(), self.sprite_capacity));
+            let spill = simulation.plough_spill_count();
             let balls = simulation
                 .write_snowballs(std::slice::from_raw_parts_mut(mapped.pData.cast::<Sprite>().add(sprites), self.sprite_capacity - sprites));
             let men = simulation.write_snowmen(std::slice::from_raw_parts_mut(
@@ -363,8 +364,8 @@ impl Surface {
                 context.IASetVertexBuffers(0, 1, Some(&Some(sprite_buffer.clone())), Some(&stride), Some(&offset));
                 context.VSSetShader(&gpu.sprite_vertex, None);
                 context.PSSetShader(&gpu.sprite_fragment, None);
-                if sprites > 0 {
-                    context.DrawInstanced(4, sprites as u32, 0, 0);
+                if sprites > spill {
+                    context.DrawInstanced(4, (sprites - spill) as u32, 0, 0);
                 }
                 for (i, ball) in simulation.snowballs().iter().enumerate() {
                     let occluders = simulation.snowball_occluders(ball);
@@ -390,11 +391,22 @@ impl Surface {
                 uniforms.pile_bottom = plough.distance;
                 uniforms.time = plough.elapsed;
                 uniforms.column_width = plough.snow_height;
+                // The plough borrows columnCount: 0 for the blade, 1 for the rotary blower.
+                uniforms.column_count = i32::from(plough.kind == snowfall_core::plough::PloughKind::Blower);
                 gpu.write(&gpu.uniforms, &uniforms)?;
                 context.IASetInputLayout(None);
                 context.VSSetShader(&gpu.plough_vertex, None);
                 context.PSSetShader(&gpu.plough_fragment, None);
                 context.Draw(4, 0);
+            }
+            if spill > 0 {
+                uniforms.occluder_count = 0;
+                uniforms.time = time;
+                gpu.write(&gpu.uniforms, &uniforms)?;
+                context.IASetInputLayout(&gpu.sprite_layout);
+                context.VSSetShader(&gpu.sprite_vertex, None);
+                context.PSSetShader(&gpu.sprite_fragment, None);
+                context.DrawInstanced(4, spill as u32, 0, (sprites - spill) as u32);
             }
             self.swap_chain.Present(1, DXGI_PRESENT(0)).ok()
         }
