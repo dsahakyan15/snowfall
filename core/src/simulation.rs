@@ -615,7 +615,7 @@ impl SnowSimulation {
         }
     }
 
-    /// Snow area in Piles, Snowballs and loose snow, including Piles kept out of sight.
+    /// Snow area in Piles, Snowballs and loose snow, including Piles and the Snowplough's load kept out of sight.
     /// Incoming flakes and decorative powder are excluded; snowfall, Melt and gusts change this total.
     pub fn snow_area(&self) -> f32 {
         let area = |pile: &SnowLayer| pile.heights.iter().sum::<f32>() * pile.column_width + pile.spill_left + pile.spill_right;
@@ -627,6 +627,7 @@ impl SnowSimulation {
             + self.play.snowmen.iter().map(Snowman::area).sum::<f32>()
             + self.air.grains.iter().map(|grain| grain.area).sum::<f32>()
             + self.air.overflow.iter().map(|(area, _)| area).sum::<f32>()
+            + self.plough.running.as_ref().map_or(0.0, |plough| plough.carried as f32)
     }
 
     fn return_snowballs(&mut self) {

@@ -2119,10 +2119,10 @@ fn snowplough_scrapes_both_ways_and_only_removes_snow_pushed_off_the_edge() {
             assert!((before - area - simulation.ploughed_area()).abs() < 1.0, "unaccounted snow: {before} - {area} - {}", simulation.ploughed_area());
             let Some(plough) = simulation.snowplough() else { break };
             assert_eq!(simulation.pace(), Pace::Lively);
-            saw_mound |= plough.snow_height > 50.0;
-            assert!(plough.snow_height < 400.0, "the mound must keep its slope instead of spiking at the edge");
+            saw_mound |= plough.snow_height > 30.0 && plough.carried > 0.0;
+            assert!(plough.snow_height <= crate::plough::MOUND_MAX, "excess snow must be carried instead of raising the mound");
             if (direction > 0.0 && plough.blade() < simulation.width() * 0.5) || (direction < 0.0 && plough.blade() > simulation.width() * 0.5) {
-                assert_eq!(simulation.ploughed_area(), 0.0, "snow must stay in the Pile until the mound reaches the edge");
+                assert_eq!(simulation.ploughed_area(), 0.0, "snow must stay in the Pile or load until the blade reaches the edge");
             }
             assert!(frame < 999, "the Snowplough never left");
         }
@@ -2149,6 +2149,7 @@ fn snowplough_pushes_ground_snow_play_whole_and_leaves_ledges_alone() {
         man.center.x = 650.0;
         simulation.bring_snowman(man);
         let ball = ground_ball(&mut simulation, 300.0, 15.0);
+        simulation.fill_ground(26.0);
         simulation.seed_random(seed);
         let before = simulation.snow_area() as f64;
         simulation.send_snowplough();
@@ -2158,11 +2159,17 @@ fn snowplough_pushes_ground_snow_play_whole_and_leaves_ledges_alone() {
             simulation.step(DT, AWAY);
             assert!((before - simulation.snow_area() as f64 - simulation.ploughed_area()).abs() < 1.0);
             if let Some(pushed) = simulation.snowballs().iter().find(|b| b.id == ball.id) {
-                rolled |= pushed.angle.abs() > 0.1;
+                rolled |= (pushed.angle - ball.angle).abs() > 0.1;
+                if (pushed.angle - ball.angle).abs() > 0.1 {
+                    assert_pushed_on_mound(&simulation, pushed.center, pushed.radius);
+                }
             }
             if let Some(pushed) = simulation.snowmen().iter().find(|m| m.id == man.id) {
                 assert_eq!(pushed.radii, man.radii);
                 wobbled |= pushed.tilt.abs() > 0.01;
+                if pushed.tilt != 0.0 {
+                    assert_pushed_on_mound(&simulation, pushed.center, pushed.radii[0]);
+                }
             }
             if simulation.snowplough().is_none() {
                 break;
@@ -2174,6 +2181,24 @@ fn snowplough_pushes_ground_snow_play_whole_and_leaves_ledges_alone() {
         assert_eq!(simulation.snowmen()[0].id, ledge_man.id);
         assert_eq!(simulation.snowmen()[0].center, ledge_man.center);
     }
+}
+
+fn assert_pushed_on_mound(simulation: &SnowSimulation, center: V2, radius: f32) {
+    let plough = simulation.snowplough().unwrap();
+    assert!(
+        ((center.x - plough.blade()) * plough.direction - radius - 4.0).abs() < 0.001,
+        "snow play at {center:?}, radius {radius}, blade {}, direction {}",
+        plough.blade(),
+        plough.direction
+    );
+    let mut buffer = vec![0.0; simulation.column_count()];
+    let layers = simulation.write_layers(&mut buffer);
+    let ground = &layers[0];
+    let levels = &buffer[ground.offset..ground.offset + ground.count];
+    let at = (center.x - ground.origin.x) / 2.0 - 0.5;
+    let surface = ground.origin.y + crate::layer::sample(levels, at);
+    assert!((center.y - radius - surface).abs() < 0.001, "pushed snow play must sit on the local mound surface");
+    assert!(surface - ground.origin.y <= 26.0 + crate::plough::MOUND_MAX + 0.001);
 }
 
 #[test]
@@ -2286,7 +2311,8 @@ fn snowplough_leaves_held_falling_and_ledge_snow_play_untouched() {
         man.center.x = 520.0;
         play.snowmen.push(man);
         let ground = SnowLayer::new(V2::ZERO, 641, 2.0, 40.0, false, (0.0, 0.0));
-        let plough = crate::plough::Snowplough { x: 400.0, direction: 1.0, distance: 544.0, elapsed: 4.0, snow_height: 0.0 };
+        let plough =
+            crate::plough::Snowplough { x: 400.0, direction: 1.0, distance: 544.0, elapsed: 4.0, snow_height: 0.0, carried: 0.0, mound: Vec::new() };
         assert_eq!(play.plough(&plough, &ground, 1280.0), 0.0);
         assert_eq!(play.balls[0].state, state);
         assert_eq!(play.balls[0].center, ball.center);
