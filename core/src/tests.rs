@@ -1370,6 +1370,7 @@ fn off_stops_the_snowfall() {
 #[test]
 fn cursor_sweeps_the_drift_aside() {
     let mut simulation = SnowSimulation::new(1280.0, 800.0, Snowfall::HeavySnow);
+    simulation.set_plough_taskbar(false);
     // Exercise carving; snow conserved in Snowballs is covered separately.
     simulation.set_snowballs(false);
     simulation.thaws = false;
@@ -2087,4 +2088,210 @@ fn a_pile_carried_for_a_window_that_never_arrives_is_let_go() {
     assert!(!to.is_empty(), "the carried Pile waits for its window");
     run(&mut to, 3.0, AWAY);
     assert!(to.is_empty(), "the carried Pile is still kept with no window for it");
+}
+
+/// A known Ground, with no new snowfall or melting during a pass.
+fn plough_scene(seed: u64, depth: f32) -> SnowSimulation {
+    let mut simulation = bare_play();
+    simulation.fill_ground(depth);
+    simulation.seed_random(seed);
+    simulation
+}
+
+#[test]
+fn snowplough_scrapes_both_ways_and_only_removes_snow_pushed_off_the_edge() {
+    let mut directions = Vec::new();
+    for seed in [1, 1 << 33] {
+        let mut simulation = plough_scene(seed, 36.0);
+        let before = simulation.snow_area() as f64;
+        simulation.send_snowplough();
+        let direction = simulation.snowplough().unwrap().direction;
+        directions.push(direction);
+        assert!(!simulation.is_empty());
+        assert_eq!(simulation.pace(), Pace::Lively);
+        let start = simulation.snowplough().unwrap().x;
+        simulation.send_snowplough();
+        assert_eq!(simulation.snowplough().unwrap().x, start);
+        let mut saw_mound = false;
+        for frame in 0..1000 {
+            assert!(simulation.step(DT, AWAY));
+            let area = simulation.snow_area() as f64;
+            assert!((before - area - simulation.ploughed_area()).abs() < 1.0, "unaccounted snow: {before} - {area} - {}", simulation.ploughed_area());
+            let Some(plough) = simulation.snowplough() else { break };
+            assert_eq!(simulation.pace(), Pace::Lively);
+            saw_mound |= plough.snow_height > 50.0;
+            assert!(plough.snow_height < 400.0, "the mound must keep its slope instead of spiking at the edge");
+            if (direction > 0.0 && plough.blade() < simulation.width() * 0.5) || (direction < 0.0 && plough.blade() > simulation.width() * 0.5) {
+                assert_eq!(simulation.ploughed_area(), 0.0, "snow must stay in the Pile until the mound reaches the edge");
+            }
+            assert!(frame < 999, "the Snowplough never left");
+        }
+        assert!(saw_mound, "snow must build up in front of the blade");
+        assert!(simulation.snowplough().is_none());
+        assert!(simulation.snow_area() / simulation.width() < 2.0);
+        assert_eq!(simulation.pace(), Pace::Calm);
+        assert!(!simulation.step(DT, AWAY));
+        // Sending again bypasses the cooldown, even with automatic visits off.
+        simulation.set_plough_taskbar(false);
+        simulation.send_snowplough();
+        assert!(simulation.snowplough().is_some());
+    }
+    assert_eq!(directions, [1.0, -1.0]);
+}
+
+#[test]
+fn snowplough_pushes_ground_snow_play_whole_and_leaves_ledges_alone() {
+    for seed in [1, 1 << 33] {
+        let mut simulation = snowball_pile(20.0);
+        let ledge_man = build_snowman(&mut simulation, 300.0);
+        let mut source = bare_play();
+        let mut man = build_snowman(&mut source, 0.0);
+        man.center.x = 650.0;
+        simulation.bring_snowman(man);
+        let ball = ground_ball(&mut simulation, 300.0, 15.0);
+        simulation.seed_random(seed);
+        let before = simulation.snow_area() as f64;
+        simulation.send_snowplough();
+        let mut rolled = false;
+        let mut wobbled = false;
+        for _ in 0..1000 {
+            simulation.step(DT, AWAY);
+            assert!((before - simulation.snow_area() as f64 - simulation.ploughed_area()).abs() < 1.0);
+            if let Some(pushed) = simulation.snowballs().iter().find(|b| b.id == ball.id) {
+                rolled |= pushed.angle.abs() > 0.1;
+            }
+            if let Some(pushed) = simulation.snowmen().iter().find(|m| m.id == man.id) {
+                assert_eq!(pushed.radii, man.radii);
+                wobbled |= pushed.tilt.abs() > 0.01;
+            }
+            if simulation.snowplough().is_none() {
+                break;
+            }
+        }
+        assert!(rolled && wobbled);
+        assert!(simulation.snowballs().is_empty());
+        assert_eq!(simulation.snowmen().len(), 1);
+        assert_eq!(simulation.snowmen()[0].id, ledge_man.id);
+        assert_eq!(simulation.snowmen()[0].center, ledge_man.center);
+    }
+}
+
+#[test]
+fn grabbing_snow_play_in_front_of_the_snowplough_frees_it() {
+    for snowman in [false, true] {
+        let mut simulation = bare_play();
+        let (id, x) = if snowman {
+            let man = build_snowman(&mut simulation, 0.0);
+            (man.id, man.center.x)
+        } else {
+            let ball = ground_ball(&mut simulation, 500.0, 18.0);
+            (ball.id, ball.center.x)
+        };
+        simulation.seed_random(1);
+        simulation.send_snowplough();
+        let mut pushed = false;
+        for _ in 0..500 {
+            simulation.step(DT, AWAY);
+            let center = if snowman { simulation.snowmen()[0].circles()[1].0 } else { simulation.snowballs()[0].center };
+            if (center.x - x).abs() > 20.0 {
+                assert!(simulation.grab(id, center));
+                pushed = true;
+                break;
+            }
+        }
+        assert!(pushed);
+        let center = if snowman { simulation.snowmen()[0].center } else { simulation.snowballs()[0].center };
+        run(&mut simulation, 15.0, AWAY);
+        let (after, state) = if snowman {
+            (simulation.snowmen()[0].center, simulation.snowmen()[0].state)
+        } else {
+            (simulation.snowballs()[0].center, simulation.snowballs()[0].state)
+        };
+        assert_eq!(after, center);
+        assert_eq!(state, SnowballState::Held);
+        assert!(simulation.snowplough().is_none());
+    }
+}
+
+#[test]
+fn snowplough_disturbs_fighters_and_clear_snow_ends_its_visit() {
+    let mut simulation = fight_scene(&[300.0, 900.0]);
+    wait_for_fight(&mut simulation, 30);
+    simulation.send_snowplough();
+    for _ in 0..500 {
+        simulation.step(DT, AWAY);
+        if simulation.snowmen().iter().any(|m| m.tilt != 0.0) {
+            break;
+        }
+    }
+    assert!(simulation.fight_turn().is_none());
+    assert!(simulation.snowplough().is_some());
+    simulation.set_snowballs(false);
+    assert!(simulation.snowplough().is_some());
+    simulation.blow_away(1.0, true);
+    assert!(simulation.snowplough().is_none());
+    run(&mut simulation, 4.0, AWAY);
+    assert!(simulation.is_empty());
+}
+
+#[test]
+fn automatic_snowplough_needs_sustained_depth_and_obeys_its_setting_and_cooldown() {
+    let mut simulation = plough_scene(1, 24.0);
+    run(&mut simulation, 70.0, AWAY);
+    assert!(simulation.snowplough().is_none(), "the threshold is strictly above 24 pt");
+    simulation.fill_ground(30.0);
+    run(&mut simulation, 59.0, AWAY);
+    assert!(simulation.snowplough().is_none());
+    simulation.fill_ground(1.0);
+    simulation.step(DT, AWAY);
+    simulation.fill_ground(30.0);
+    run(&mut simulation, 59.0, AWAY);
+    assert!(simulation.snowplough().is_none(), "a shallow interval must restart the wait");
+    run(&mut simulation, 1.1, AWAY);
+    assert!(simulation.snowplough().is_some());
+    run(&mut simulation, 15.0, AWAY);
+    assert!(simulation.snowplough().is_none());
+    simulation.fill_ground(30.0);
+    run(&mut simulation, 1700.0, AWAY);
+    assert!(simulation.snowplough().is_none(), "thirty minutes have not passed");
+    run(&mut simulation, 86.0, AWAY);
+    assert!(simulation.snowplough().is_some(), "sustained deep snow can call the next visit after thirty minutes");
+    for main_screen in [false, true] {
+        let mut disabled = plough_scene(1, 36.0);
+        disabled.set_main_screen(main_screen);
+        disabled.set_plough_taskbar(false);
+        run(&mut disabled, 1900.0, AWAY);
+        assert!(disabled.snowplough().is_none());
+        disabled.send_snowplough();
+        assert_eq!(disabled.snowplough().is_some(), main_screen);
+        if !main_screen {
+            disabled.set_plough_taskbar(true);
+            run(&mut disabled, 70.0, AWAY);
+            assert!(disabled.snowplough().is_none(), "secondary screens never get automatic visits");
+        }
+    }
+}
+
+#[test]
+fn snowplough_leaves_held_falling_and_ledge_snow_play_untouched() {
+    let mut source = bare_play();
+    let man = build_snowman(&mut source, 0.0);
+    for state in [SnowballState::Held, SnowballState::Falling, SnowballState::Resting { on: Surface::Ledge(7) }] {
+        let mut play = SnowPlay::new();
+        let mut ball = flight_ball(V2::new(520.0, 20.0), 20.0);
+        ball.state = state;
+        play.balls.push(ball);
+        let mut man = man;
+        man.state = state;
+        man.center.x = 520.0;
+        play.snowmen.push(man);
+        let ground = SnowLayer::new(V2::ZERO, 641, 2.0, 40.0, false, (0.0, 0.0));
+        let plough = crate::plough::Snowplough { x: 400.0, direction: 1.0, distance: 544.0, elapsed: 4.0, snow_height: 0.0 };
+        assert_eq!(play.plough(&plough, &ground, 1280.0), 0.0);
+        assert_eq!(play.balls[0].state, state);
+        assert_eq!(play.balls[0].center, ball.center);
+        assert_eq!(play.snowmen[0].state, state);
+        assert_eq!(play.snowmen[0].center, man.center);
+        assert_eq!(play.snowmen[0].circles(), man.circles());
+    }
 }

@@ -324,6 +324,11 @@ fn choose(window: HWND, action: Action) {
     match action {
         Action::Quit => quit(window),
         Action::CheckForUpdates => check_for_updates(window, true),
+        Action::SendSnowplough => APP.with_borrow(|app| {
+            if let Some(app) = app {
+                send(app, Command::SendSnowplough);
+            }
+        }),
         Action::ClearSnow => APP.with_borrow(|app| {
             if let Some(app) = app {
                 send(app, Command::ClearSnow(!animations_enabled()));

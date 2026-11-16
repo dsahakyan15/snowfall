@@ -80,6 +80,8 @@ pub struct Gpu {
     sprite_layout: ID3D11InputLayout,
     pile_vertex: ID3D11VertexShader,
     pile_fragment: ID3D11PixelShader,
+    plough_vertex: ID3D11VertexShader,
+    plough_fragment: ID3D11PixelShader,
     blend: ID3D11BlendState,
     raster: ID3D11RasterizerState,
     uniforms: ID3D11Buffer,
@@ -117,6 +119,8 @@ impl Gpu {
             let pile_vertex = vertex_shader(&device, &pile_code)?;
             let sprite_fragment = pixel_shader(&device, &compile(s!("spriteFragment"), s!("ps_4_0"))?)?;
             let pile_fragment = pixel_shader(&device, &compile(s!("pileFragment"), s!("ps_4_0"))?)?;
+            let plough_vertex = vertex_shader(&device, &compile(s!("ploughVertex"), s!("vs_4_0"))?)?;
+            let plough_fragment = pixel_shader(&device, &compile(s!("ploughFragment"), s!("ps_4_0"))?)?;
 
             let element = |name: PCSTR, format: DXGI_FORMAT, offset: u32| D3D11_INPUT_ELEMENT_DESC {
                 SemanticName: name,
@@ -173,6 +177,8 @@ impl Gpu {
                 sprite_layout: sprite_layout.ok_or_else(Error::empty)?,
                 pile_vertex,
                 pile_fragment,
+                plough_vertex,
+                plough_fragment,
                 blend: blend.ok_or_else(Error::empty)?,
                 raster: raster.ok_or_else(Error::empty)?,
                 uniforms,
@@ -377,6 +383,19 @@ impl Surface {
                     context.DrawInstanced(4, 3, 0, (sprites + balls + i * 3) as u32);
                 }
             }
+            if let Some(plough) = simulation.snowplough() {
+                // One quad, mirrored about the vehicle's back; all its parts stay in points.
+                uniforms.origin = [plough.x, 1.5];
+                uniforms.pile_top = plough.direction;
+                uniforms.pile_bottom = plough.distance;
+                uniforms.time = plough.elapsed;
+                uniforms.column_width = plough.snow_height;
+                gpu.write(&gpu.uniforms, &uniforms)?;
+                context.IASetInputLayout(None);
+                context.VSSetShader(&gpu.plough_vertex, None);
+                context.PSSetShader(&gpu.plough_fragment, None);
+                context.Draw(4, 0);
+            }
             self.swap_chain.Present(1, DXGI_PRESENT(0)).ok()
         }
     }
@@ -443,6 +462,8 @@ mod tests {
             (s!("spriteFragment"), s!("ps_4_0")),
             (s!("pileVertex"), s!("vs_4_0")),
             (s!("pileFragment"), s!("ps_4_0")),
+            (s!("ploughVertex"), s!("vs_4_0")),
+            (s!("ploughFragment"), s!("ps_4_0")),
         ] {
             compile(entry, target).expect("the shader must compile on supported D3D11 devices");
         }

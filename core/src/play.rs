@@ -108,6 +108,8 @@ pub struct Snowman {
     pub hop_velocity: f32,
     /// Keeps looking toward the other Snowman after a fight.
     pub facing: f32,
+    /// Leans back and wobbles while pushed whole by the Snowplough.
+    pub tilt: f32,
     pub(crate) dents: [Option<Dent>; 3],
     wind_up: f32,
     idle_for: f64,
@@ -131,7 +133,14 @@ impl Snowman {
         let base = self.center + V2::new(0.0, self.hop_offset);
         let squash = 1.0 - 0.12 * self.wind_up;
         let lean = -self.facing * 4.0 * self.wind_up;
-        [(base, a), (base + V2::new(lean, a + b * squash), b * squash), (base + V2::new(lean * 1.5, a + (2.0 * b + c) * squash), c * squash)]
+        let pivot = base - V2::new(0.0, a);
+        let (s, c_) = self.tilt.sin_cos();
+        [(base, a), (base + V2::new(lean, a + b * squash), b * squash), (base + V2::new(lean * 1.5, a + (2.0 * b + c) * squash), c * squash)].map(
+            |(center, radius)| {
+                let d = center - pivot;
+                (pivot + V2::new(c_ * d.x - s * d.y, s * d.x + c_ * d.y), radius)
+            },
+        )
     }
 
     pub fn contains(&self, point: V2) -> bool {
@@ -544,6 +553,7 @@ impl SnowPlay {
             changed |= (ball.center - previous).length_squared() > 0.0001;
         }
         for man in self.snowmen.iter_mut().filter(|m| m.surface() == Some(on)) {
+            man.tilt = 0.0;
             let before = man.center;
             man.center += layer.origin - man.support_origin;
             man.support_origin = layer.origin;
@@ -573,6 +583,48 @@ impl SnowPlay {
         }
         self.follow_stacks();
         changed
+    }
+
+    /// Pushes only snow play resting on the Ground; grabbing one frees it at once.
+    pub fn plough(&mut self, plough: &crate::plough::Snowplough, ground: &SnowLayer, width: f32) -> f64 {
+        let blade = plough.blade();
+        let direction = plough.direction;
+        let touches = |x: f32, radius: f32| {
+            let ahead = (x - blade) * direction;
+            ahead < radius + 4.0 && ahead > -crate::plough::LENGTH
+        };
+        let gone = |x: f32, radius: f32| if direction > 0.0 { x - radius > width } else { x + radius < 0.0 };
+        let mut removed = 0.0;
+        for ball in self.balls.iter_mut().filter(|b| b.surface() == Some(Surface::Ground)) {
+            if touches(ball.center.x, ball.radius) {
+                let x = blade + direction * (ball.radius + 4.0);
+                ball.angle -= (x - ball.center.x) / ball.radius;
+                ball.center.x = x;
+                ball.center.y = seat_height(ground, x) + ball.radius;
+                ball.velocity = V2::ZERO;
+                ball.state = SnowballState::Resting { on: Surface::Ground };
+                ball.stacked_on = None;
+                if gone(x, ball.radius) {
+                    removed += ball.area() as f64;
+                }
+            }
+        }
+        self.balls.retain(|b| b.surface() != Some(Surface::Ground) || !gone(b.center.x, b.radius));
+        let pushed: Vec<_> =
+            self.snowmen.iter().filter(|m| m.surface() == Some(Surface::Ground) && touches(m.center.x, m.radii[0])).map(|m| m.id).collect();
+        for id in pushed {
+            self.disturb(id);
+            let man = self.snowmen.iter_mut().find(|m| m.id == id).unwrap();
+            let radius = man.radii[0];
+            man.center.x = blade + direction * (radius + 4.0);
+            man.center.y = seat_height(ground, man.center.x) + radius;
+            man.tilt = direction * (0.06 + (plough.elapsed * 14.0).sin() * 0.07);
+            if gone(man.center.x, radius) {
+                removed += man.area() as f64;
+            }
+        }
+        self.snowmen.retain(|m| m.surface() != Some(Surface::Ground) || !gone(m.center.x, m.radii[0]));
+        removed
     }
 
     /// Detaching either ball dissolves its Stack without creating or losing snow.
@@ -614,6 +666,7 @@ impl SnowPlay {
                 hop_offset: 0.0,
                 hop_velocity: 0.0,
                 facing: 1.0,
+                tilt: 0.0,
                 dents: [None; 3],
                 wind_up: 0.0,
                 idle_for: 0.0,
@@ -667,6 +720,7 @@ impl SnowPlay {
             man.center.y += man.hop_offset;
             man.hop_offset = 0.0;
             man.hop_velocity = 0.0;
+            man.tilt = 0.0;
             man.grab_offset = man.center - point;
             man.state = SnowballState::Held;
             man.velocity = V2::ZERO;

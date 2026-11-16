@@ -32,6 +32,7 @@ pub struct Settings {
     pub screens_off: BTreeSet<String>,
     pub opacity: Opacity,
     pub snowballs: bool,
+    pub plough_taskbar: bool,
     pub melt: bool,
     pub keep_windows_clear: bool,
     pub behind_windows: bool,
@@ -49,6 +50,7 @@ impl Default for Settings {
             screens_off: BTreeSet::new(),
             opacity: Opacity(100),
             snowballs: true,
+            plough_taskbar: true,
             melt: true,
             keep_windows_clear: false,
             behind_windows: false,
@@ -69,6 +71,7 @@ pub enum Change {
     Screen(String, bool),
     Opacity(Opacity),
     Snowballs(bool),
+    PloughTaskbar(bool),
     Melt(bool),
     KeepWindowsClear(bool),
     BehindWindows(bool),
@@ -91,6 +94,7 @@ impl Settings {
             }
             Change::Opacity(opacity) => self.opacity = opacity,
             Change::Snowballs(on) => self.snowballs = on,
+            Change::PloughTaskbar(on) => self.plough_taskbar = on,
             Change::Melt(on) => self.melt = on,
             Change::KeepWindowsClear(on) => self.keep_windows_clear = on,
             Change::BehindWindows(on) => self.behind_windows = on,
@@ -118,6 +122,7 @@ impl Settings {
                 .unwrap_or(defaults.screens_off),
             opacity: store.number("opacity").and_then(|percent| Opacity::ALL.into_iter().find(|o| o.0 as u32 == percent)).unwrap_or(defaults.opacity),
             snowballs: flag("snowballs", defaults.snowballs),
+            plough_taskbar: flag("ploughTaskbar", defaults.plough_taskbar),
             melt: flag("melt", defaults.melt),
             keep_windows_clear: flag("keepWindowsClear", defaults.keep_windows_clear),
             behind_windows: flag("behindWindows", defaults.behind_windows),
@@ -134,6 +139,7 @@ impl Settings {
         store.set_text("screensOff", &self.screens_off.iter().cloned().collect::<Vec<_>>().join("\n"));
         store.set_number("opacity", self.opacity.0 as u32);
         store.set_number("snowballs", self.snowballs as u32);
+        store.set_number("ploughTaskbar", self.plough_taskbar as u32);
         store.set_number("melt", self.melt as u32);
         store.set_number("keepWindowsClear", self.keep_windows_clear as u32);
         store.set_number("behindWindows", self.behind_windows as u32);
@@ -219,6 +225,7 @@ mod tests {
         assert!(settings.screens_off.is_empty(), "every screen gets snow");
         assert_eq!(settings.opacity.percent(), 100);
         assert!(settings.snowballs);
+        assert!(settings.plough_taskbar);
         assert!(settings.melt);
         assert!(!settings.keep_windows_clear);
         assert!(!settings.behind_windows);
@@ -241,6 +248,7 @@ mod tests {
             screens_off: ["\\\\?\\DISPLAY#A".to_owned(), "\\\\?\\DISPLAY#B".to_owned()].into(),
             opacity: Opacity(40),
             snowballs: false,
+            plough_taskbar: false,
             melt: false,
             keep_windows_clear: true,
             behind_windows: true,
@@ -251,6 +259,7 @@ mod tests {
         };
         let mut store = MemoryStore::default();
         changed.save(&mut store);
+        assert_eq!(store.number("ploughTaskbar"), Some(0));
         assert_eq!(Settings::load(&store), changed);
     }
 
