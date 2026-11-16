@@ -2183,10 +2183,41 @@ fn snowplough_pushes_ground_snow_play_whole_and_leaves_ledges_alone() {
     }
 }
 
+#[test]
+fn snow_play_pushed_by_the_snowplough_queues_up_instead_of_overlapping() {
+    for seed in [1, 1 << 33] {
+        let mut simulation = plough_scene(seed, 26.0);
+        for x in [600.0, 700.0] {
+            let mut man = build_snowman(&mut bare_play(), 0.0);
+            man.center.x = x;
+            simulation.bring_snowman(man);
+        }
+        ground_ball(&mut simulation, 650.0, 12.0);
+        simulation.send_snowplough();
+        let mut queued = false;
+        for _ in 0..1000 {
+            simulation.step(DT, AWAY);
+            let mut bottoms: Vec<(f32, f32)> = simulation.snowmen().iter().map(|m| (m.center.x, m.radii[0])).collect();
+            bottoms.extend(simulation.snowballs().iter().map(|b| (b.center.x, b.radius)));
+            bottoms.sort_by(|a, b| a.0.total_cmp(&b.0));
+            for pair in bottoms.windows(2) {
+                assert!(pair[1].0 - pair[0].0 >= pair[0].1 + pair[1].1 - 0.01, "pushed snow play overlaps: {pair:?}");
+            }
+            queued |= simulation.snowmen().iter().filter(|m| m.tilt != 0.0).count() == 2;
+            if simulation.snowplough().is_none() {
+                break;
+            }
+        }
+        assert!(queued, "both Snowmen should end up pushed together");
+        assert!(simulation.snowmen().is_empty() && simulation.snowballs().is_empty());
+    }
+}
+
 fn assert_pushed_on_mound(simulation: &SnowSimulation, center: V2, radius: f32) {
     let plough = simulation.snowplough().unwrap();
+    // Against the blade, or queued ahead of whatever the blade already pushes.
     assert!(
-        ((center.x - plough.blade()) * plough.direction - radius - 4.0).abs() < 0.001,
+        (center.x - plough.blade()) * plough.direction - radius - 4.0 > -0.001,
         "snow play at {center:?}, radius {radius}, blade {}, direction {}",
         plough.blade(),
         plough.direction

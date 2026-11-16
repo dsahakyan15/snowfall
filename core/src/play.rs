@@ -589,40 +589,51 @@ impl SnowPlay {
     pub fn plough(&mut self, plough: &crate::plough::Snowplough, ground: &SnowLayer, width: f32) -> f64 {
         let blade = plough.blade();
         let direction = plough.direction;
-        let touches = |x: f32, radius: f32| {
-            let ahead = (x - blade) * direction;
-            ahead < radius + 4.0 && ahead > -crate::plough::LENGTH
-        };
+        let ahead = |x: f32| (x - blade) * direction;
         let gone = |x: f32, radius: f32| if direction > 0.0 { x - radius > width } else { x + radius < 0.0 };
+        // Nearest first, so whatever the blade pushes queues up against the one before instead of overlapping it.
+        let mut order: Vec<(bool, usize, f32)> = self
+            .balls
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.surface() == Some(Surface::Ground))
+            .map(|(i, b)| (false, i, ahead(b.center.x)))
+            .chain(self.snowmen.iter().enumerate().filter(|(_, m)| m.surface() == Some(Surface::Ground)).map(|(i, m)| (true, i, ahead(m.center.x))))
+            .collect();
+        order.sort_by(|a, b| a.2.total_cmp(&b.2));
+        let mut front = 0.0;
         let mut removed = 0.0;
-        for ball in self.balls.iter_mut().filter(|b| b.surface() == Some(Surface::Ground)) {
-            if touches(ball.center.x, ball.radius) {
-                let x = blade + direction * (ball.radius + 4.0);
+        for (snowman, i, at) in order {
+            let radius = if snowman { self.snowmen[i].radii[0] } else { self.balls[i].radius };
+            if at <= -crate::plough::LENGTH || at - radius >= front + 4.0 {
+                continue;
+            }
+            let x = blade + direction * (front + 4.0 + radius).max(at);
+            front = (x - blade) * direction + radius;
+            if snowman {
+                let id = self.snowmen[i].id;
+                self.disturb(id);
+                let man = &mut self.snowmen[i];
+                man.center.x = x;
+                man.center.y = seat_height(ground, x) + radius;
+                man.tilt = direction * (0.06 + (plough.elapsed * 14.0).sin() * 0.07);
+                if gone(x, radius) {
+                    removed += man.area() as f64;
+                }
+            } else {
+                let ball = &mut self.balls[i];
                 ball.angle -= (x - ball.center.x) / ball.radius;
                 ball.center.x = x;
                 ball.center.y = seat_height(ground, x) + ball.radius;
                 ball.velocity = V2::ZERO;
                 ball.state = SnowballState::Resting { on: Surface::Ground };
                 ball.stacked_on = None;
-                if gone(x, ball.radius) {
+                if gone(x, radius) {
                     removed += ball.area() as f64;
                 }
             }
         }
         self.balls.retain(|b| b.surface() != Some(Surface::Ground) || !gone(b.center.x, b.radius));
-        let pushed: Vec<_> =
-            self.snowmen.iter().filter(|m| m.surface() == Some(Surface::Ground) && touches(m.center.x, m.radii[0])).map(|m| m.id).collect();
-        for id in pushed {
-            self.disturb(id);
-            let man = self.snowmen.iter_mut().find(|m| m.id == id).unwrap();
-            let radius = man.radii[0];
-            man.center.x = blade + direction * (radius + 4.0);
-            man.center.y = seat_height(ground, man.center.x) + radius;
-            man.tilt = direction * (0.06 + (plough.elapsed * 14.0).sin() * 0.07);
-            if gone(man.center.x, radius) {
-                removed += man.area() as f64;
-            }
-        }
         self.snowmen.retain(|m| m.surface() != Some(Surface::Ground) || !gone(m.center.x, m.radii[0]));
         removed
     }
