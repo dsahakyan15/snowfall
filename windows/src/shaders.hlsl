@@ -233,7 +233,8 @@ float4 pileFragment(PileOut i) : SV_Target {
 }
 
 // The Snowplough uses the same constants: origin is its back, pileTop its direction,
-// pileBottom distance travelled, columnWidth the snow at the blade, time its running time.
+// pileBottom distance travelled, columnWidth the snow at the blade, time its running time,
+// and columnCount its kind (0 = blade, 1 = rotary blower).
 struct PloughOut {
     float4 position : SV_Position;
     float2 local : TEXCOORD0;
@@ -307,14 +308,32 @@ float4 ploughFragment(PloughOut i) : SV_Target {
     color = float4(float3(1.0, 0.48, 0.08) * glow + color.rgb * (1.0 - glow), glow + color.a * (1.0 - glow));
     float beacon = max(length(p - float2(36.0, 72.0)) - 4.5, 70.0 - p.y);
     ploughPaint(color, lerp(float3(0.63, 0.32, 0.10), float3(1.0, 0.55, 0.11), on), beacon, 1.0);
-    ploughPaint(color, float3(0.28, 0.31, 0.35), ploughLine(p, float2(96.0, 25.0), float2(110.0, 6.0)) - 2.0, 1.0);
-    // A bowed orange blade with a straight grey cutting edge.
-    float v = saturate((p.y - 1.0) / 30.0);
-    float right = 124.0 - 2.0 * v - 14.0 * v * v;
-    float left = 110.0 - 2.0 * v;
-    float blade = max(max(left - p.x, p.x - right), max(1.0 - p.y, p.y - 31.0));
-    ploughPaint(color, lerp(float3(0.72, 0.22, 0.06), float3(0.98, 0.43, 0.13), saturate((p.x - left) / 12.0)), blade, 1.0);
-    ploughPaint(color, float3(0.63, 0.68, 0.73), ploughBox(p, float2(117.0, 2.5), float2(8.0, 1.5), 0.4), 1.0);
+    if (columnCount == 1) {
+        // A half-round orange auger; the diagonal spiral turns as the tracks move.
+        float2 auger = p - float2(110.0, 14.0);
+        float housing = max(length(float2(max(auger.x, 0.0), auger.y)) - 16.0, -6.0 - auger.x);
+        ploughPaint(color, float3(0.85, 0.33, 0.12), housing, 1.0);
+        float inside = max(length(auger) - 13.0, -auger.x);
+        float spiral = abs(frac((auger.y + auger.x * 0.75 + pileBottom * 3.0 / 7.0) / 12.0) - 0.5) * 12.0 - 1.25;
+        ploughPaint(color, float3(0.54, 0.18, 0.055), max(inside, spiral), 1.0);
+        // A 42 pt yellow chute rises from the front of the body to an orange rim.
+        float chuteX = 84.0 + (p.y - 37.0) / 42.0 * 2.0;
+        float chute = max(abs(p.x - chuteX) - 6.0, max(37.0 - p.y, p.y - 79.0));
+        ploughPaint(color, yellow, chute, 1.0);
+        float2 rim = (p - float2(86.0, 81.0)) / float2(9.0, 4.0);
+        ploughPaint(color, float3(0.85, 0.33, 0.12), (length(rim) - 1.0) * 4.0, 1.0);
+        float2 opening = (p - float2(86.0, 81.0)) / float2(6.0, 2.4);
+        ploughPaint(color, float3(0.36, 0.14, 0.06), (length(opening) - 1.0) * 2.4, 1.0);
+    } else {
+        ploughPaint(color, float3(0.28, 0.31, 0.35), ploughLine(p, float2(96.0, 25.0), float2(110.0, 6.0)) - 2.0, 1.0);
+        // A bowed orange blade with a straight grey cutting edge.
+        float v = saturate((p.y - 1.0) / 30.0);
+        float right = 124.0 - 2.0 * v - 14.0 * v * v;
+        float left = 110.0 - 2.0 * v;
+        float blade = max(max(left - p.x, p.x - right), max(1.0 - p.y, p.y - 31.0));
+        ploughPaint(color, lerp(float3(0.72, 0.22, 0.06), float3(0.98, 0.43, 0.13), saturate((p.x - left) / 12.0)), blade, 1.0);
+        ploughPaint(color, float3(0.63, 0.68, 0.73), ploughBox(p, float2(117.0, 2.5), float2(8.0, 1.5), 0.4), 1.0);
+    }
     // Small grey exhaust puffs drift back. They are part of this one quad, with no snow area.
     [unroll]
     for (int smoke = 0; smoke < 4; smoke++) {
@@ -324,13 +343,6 @@ float4 ploughFragment(PloughOut i) : SV_Target {
         float d = length(p - center) / radius;
         float a = (1.0 - smoothstep(0.25, 1.0, d)) * (1.0 - age) * 0.28 * smoothstep(0.0, 0.1, age);
         color = float4(float3(0.60, 0.65, 0.71) * a + color.rgb * (1.0 - a), a + color.a * (1.0 - a));
-    }
-    [unroll]
-    for (int snow = 0; snow < 7; snow++) {
-        float age = frac(time * 1.7 + float(snow) / 7.0);
-        float2 center = float2(127.0 + age * (38.0 + float(snow) * 4.0), columnWidth + 2.0 + age * 80.0 - age * age * 95.0);
-        float a = (1.0 - age) * step(2.5, columnWidth);
-        ploughPaint(color, float3(0.96, 0.98, 1.0), length(p - center) - (1.2 + float(snow % 3) * 0.6), a);
     }
     return color;
 }

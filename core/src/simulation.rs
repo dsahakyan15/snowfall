@@ -277,6 +277,11 @@ struct Mote {
 pub(crate) struct Random(u64);
 
 impl Random {
+    #[cfg(test)]
+    pub(crate) fn seeded(seed: u64) -> Self {
+        Self(seed.max(1))
+    }
+
     fn new() -> Random {
         Random(RandomState::new().build_hasher().finish().max(1))
     }
@@ -416,7 +421,7 @@ impl SnowSimulation {
 
     #[cfg(test)]
     pub(crate) fn seed_random(&mut self, seed: u64) {
-        self.air.random = Random(seed.max(1));
+        self.air.random = Random::seeded(seed);
     }
 
     pub fn height(&self) -> f32 {
@@ -615,7 +620,7 @@ impl SnowSimulation {
         }
     }
 
-    /// Snow area in Piles, Snowballs and loose snow, including Piles and the Snowplough's load kept out of sight.
+    /// Snow area in Piles, Snowballs and loose snow, including Piles kept out of sight.
     /// Incoming flakes and decorative powder are excluded; snowfall, Melt and gusts change this total.
     pub fn snow_area(&self) -> f32 {
         let area = |pile: &SnowLayer| pile.heights.iter().sum::<f32>() * pile.column_width + pile.spill_left + pile.spill_right;
@@ -627,7 +632,6 @@ impl SnowSimulation {
             + self.play.snowmen.iter().map(Snowman::area).sum::<f32>()
             + self.air.grains.iter().map(|grain| grain.area).sum::<f32>()
             + self.air.overflow.iter().map(|(area, _)| area).sum::<f32>()
-            + self.plough.running.as_ref().map_or(0.0, |plough| plough.carried as f32)
     }
 
     fn return_snowballs(&mut self) {
@@ -669,7 +673,17 @@ impl SnowSimulation {
     }
 
     pub fn sprite_count(&self) -> usize {
-        self.air.flakes.len() + self.air.grains.len() + self.air.motes.len() + self.play.projectiles.len() + self.play.puffs.len()
+        self.air.flakes.len()
+            + self.air.grains.len()
+            + self.air.motes.len()
+            + self.play.projectiles.len()
+            + self.play.puffs.len()
+            + self.plough_spill_count()
+    }
+
+    /// The last airborne sprites spill in front of the Snowplough.
+    pub fn plough_spill_count(&self) -> usize {
+        self.plough.particles.len()
     }
 
     /// Floats the renderer needs per frame: each layer's surface and bed.
@@ -744,12 +758,12 @@ impl SnowSimulation {
             self.air.heights_changed = true;
         }
 
+        self.plough.advance(&mut self.layers[0], dt, &mut self.air.random);
         if let Some(plough) = &mut self.plough.running {
-            self.plough.removed_area += plough.advance(&mut self.layers[0], dt);
             self.plough.removed_area += self.play.plough(plough, &self.layers[0], self.width);
             self.air.heights_changed = true;
             if (plough.direction > 0.0 && plough.x > self.width + 20.0) || (plough.direction < 0.0 && plough.x < -20.0) {
-                self.plough.stop();
+                self.plough.running = None;
             }
         }
 
@@ -762,6 +776,7 @@ impl SnowSimulation {
         let pushed = air.clock - air.last_window_motion < 0.6 || air.clock - air.last_cursor_push < 0.3 || air.gust.is_some() || self.play.active();
         // The steady trickle off window corners is a few tiny grains at a time; they read fine at the calm rate.
         let flying = self.plough.running.is_some()
+            || !self.plough.particles.is_empty()
             || air.grains.len() > 24
             || air.slide_wind.abs() > 20.0
             || self.play.fighting()
@@ -879,7 +894,8 @@ impl SnowSimulation {
             soft: 0.3,
             ..Sprite::default()
         });
-        for (slot, sprite) in buffer.iter_mut().zip(flakes.chain(grains).chain(motes).chain(projectiles).chain(puffs)) {
+        let spill = self.plough.particles.iter().map(|particle| particle.sprite(self.opacity));
+        for (slot, sprite) in buffer.iter_mut().zip(flakes.chain(grains).chain(motes).chain(projectiles).chain(puffs).chain(spill)) {
             *slot = sprite;
             count += 1;
         }
