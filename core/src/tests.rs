@@ -716,6 +716,285 @@ fn build_snowman(simulation: &mut SnowSimulation, y: f32) -> crate::play::Snowma
     simulation.snowmen()[0]
 }
 
+fn fight_scene(xs: &[f32]) -> SnowSimulation {
+    let mut simulation = bare_play();
+    for &x in xs {
+        let mut source = bare_play();
+        let id = build_snowman(&mut source, 0.0).id;
+        let mut man = source.take_snowman(id).unwrap();
+        man.center.x = x;
+        simulation.bring_snowman(man);
+    }
+    simulation.seed_random(40);
+    simulation
+}
+
+fn wait_for_fight(simulation: &mut SnowSimulation, rate: usize) {
+    let dt = 1.0 / rate as f32;
+    for _ in 1..180 * rate {
+        simulation.step(dt, AWAY);
+        assert!(simulation.fight_turn().is_none(), "the Snowmen fought before three minutes of idle time");
+        assert_eq!(simulation.pace(), Pace::Calm);
+    }
+    assert!(simulation.step(dt, AWAY));
+    assert!(simulation.fight_turn().is_some(), "a calm screen must wake for a fight within one frame");
+    assert_eq!(simulation.pace(), Pace::Lively);
+}
+
+#[test]
+fn idle_snowmen_throw_nine_times_in_turn_without_losing_any_snow() {
+    for rate in [24, 30, 144] {
+        let mut simulation = fight_scene(&[300.0, 900.0]);
+        let area = simulation.snow_area();
+        let radii: Vec<_> = simulation.snowmen().iter().map(|m| m.radii).collect();
+        wait_for_fight(&mut simulation, rate);
+        let pair = simulation.fight_turn().unwrap().0;
+        let mut throws = 0;
+        let mut elapsed = 0.0;
+        let mut hits = 0;
+        let dt = 1.0 / rate as f32;
+        while simulation.fight_turn().is_some() {
+            assert!(simulation.step(dt, AWAY));
+            elapsed += dt;
+            assert!(elapsed < 12.0, "the fight never ended");
+            assert_eq!(simulation.snowmen().len(), 2);
+            assert!((simulation.snow_area() - area).abs() < 0.001);
+            assert_eq!(simulation.snowmen().iter().map(|m| m.radii).collect::<Vec<_>>(), radii);
+            if let Some((actual_pair, count)) = simulation.fight_turn() {
+                assert_eq!(actual_pair, pair, "only one pair fights at a time");
+                if count != throws {
+                    assert_eq!(count, throws + 1);
+                    let expected = 0.2 + throws as f32 * 1.15;
+                    assert!((elapsed - expected).abs() < dt * 2.0, "throw {count} at {elapsed}, expected {expected}");
+                    let mut sprites = vec![Sprite::default(); simulation.sprite_count()];
+                    simulation.write_sprites(&mut sprites);
+                    let projectile = sprites.iter().filter(|s| s.ball == 1.0).min_by(|a, b| a.position.y.total_cmp(&b.position.y)).unwrap();
+                    let thrower = &simulation.snowmen()[throws as usize % 2];
+                    assert!((projectile.position.x - thrower.center.x).abs() < 70.0, "the wrong Snowman threw");
+                    assert_eq!(projectile.size, 11.0);
+                    throws = count;
+                }
+            }
+            hits += simulation.snowmen().iter().flat_map(|m| m.dents).filter(Option::is_some).count();
+        }
+        assert_eq!(throws, 9);
+        assert!(hits > 0);
+        assert!(elapsed > 9.4 && elapsed < 11.5);
+        assert_eq!(simulation.snowmen()[0].facing, 1.0);
+        assert_eq!(simulation.snowmen()[1].facing, -1.0);
+        run(&mut simulation, 6.0, AWAY);
+        assert_eq!(simulation.sprite_count(), 0);
+        assert_eq!(simulation.pace(), Pace::Calm);
+        assert!(!simulation.step(DT, AWAY));
+        assert!(simulation.snowmen().iter().all(|m| m.dents.iter().all(Option::is_none)));
+        assert_eq!(simulation.snowmen()[1].facing, -1.0);
+        assert!((simulation.snow_area() - area).abs() < 0.001);
+        // Both wait three more minutes after the last projectile resolves.
+        run(&mut simulation, 173.0, AWAY);
+        assert!(simulation.fight_turn().is_none());
+        run(&mut simulation, 2.0, AWAY);
+        assert!(simulation.fight_turn().is_some());
+    }
+}
+
+#[test]
+fn grabbing_either_fighter_stops_the_fight_and_restarts_the_wait() {
+    for index in 0..2 {
+        let mut simulation = fight_scene(&[300.0, 900.0]);
+        wait_for_fight(&mut simulation, 30);
+        run(&mut simulation, 0.4, AWAY);
+        let man = simulation.snowmen()[index];
+        assert!(simulation.grab(man.id, man.circles()[2].0));
+        assert!(simulation.fight_turn().is_none(), "grabbing must stop the fight before the next step");
+        simulation.move_held(man.circles()[2].0 + V2::new(30.0, 0.0));
+        run(&mut simulation, 181.0, AWAY);
+        assert!(simulation.fight_turn().is_none(), "a Held Snowman cannot join a fight");
+        simulation.release(V2::ZERO);
+        run(&mut simulation, 1.0, AWAY);
+        assert!(matches!(simulation.snowmen()[index].state, SnowballState::Resting { .. }));
+        run(&mut simulation, 178.0, AWAY);
+        assert!(simulation.fight_turn().is_none());
+        run(&mut simulation, 2.0, AWAY);
+        assert!(simulation.fight_turn().is_some());
+    }
+}
+
+#[test]
+fn one_snowman_on_each_screen_never_fights() {
+    let mut a = fight_scene(&[300.0]);
+    let mut b = fight_scene(&[900.0]);
+    for _ in 0..200 * 24 {
+        a.step(1.0 / 24.0, AWAY);
+        b.step(1.0 / 24.0, AWAY);
+        assert!(a.fight_turn().is_none() && b.fight_turn().is_none());
+    }
+    assert_eq!(a.pace(), Pace::Calm);
+    assert_eq!(b.pace(), Pace::Calm);
+}
+
+#[test]
+fn only_the_nearest_idle_pair_fights_and_carrying_either_away_stops_it() {
+    let mut simulation = fight_scene(&[150.0, 800.0, 950.0]);
+    wait_for_fight(&mut simulation, 30);
+    assert_eq!(simulation.fight_turn().unwrap().0, [simulation.snowmen()[1].id, simulation.snowmen()[2].id]);
+    let bystander = simulation.snowmen()[0];
+    assert!(simulation.grab(bystander.id, bystander.center));
+    simulation.move_held(bystander.center + V2::new(0.0, 10.0));
+    simulation.release(V2::ZERO);
+    run(&mut simulation, 0.5, AWAY);
+    assert!(simulation.fight_turn().is_some(), "moving a bystander must leave the fighters alone");
+    let id = simulation.snowmen()[2].id;
+    let man = simulation.take_snowman(id).unwrap();
+    assert!(simulation.fight_turn().is_none());
+    let mut other = bare_play();
+    other.bring_snowman(man);
+    simulation.step(DT, AWAY);
+    other.step(DT, AWAY);
+    assert!(simulation.fight_turn().is_none() && other.fight_turn().is_none());
+}
+
+#[test]
+fn fight_dents_shrink_and_disappear_five_seconds_after_the_hit() {
+    let mut simulation = fight_scene(&[300.0, 900.0]);
+    wait_for_fight(&mut simulation, 30);
+    let (id, circle, dent) = loop {
+        simulation.step(DT, AWAY);
+        let hit = simulation.snowmen().iter().find_map(|m| m.dents.iter().enumerate().find_map(|(i, d)| d.map(|d| (m.id, i, d))));
+        if let Some(hit) = hit {
+            break hit;
+        }
+        assert!(simulation.fight_turn().is_some(), "the seeded fight should hit a Snowman");
+    };
+    assert_eq!(dent.remaining, 5.0);
+    assert!((0.18..=0.28).contains(&dent.radius));
+    assert!((dent.direction.length() - 1.0).abs() < 0.001);
+    let target = *simulation.snowmen().iter().find(|m| m.id == id).unwrap();
+    assert!(target.hop_velocity > 0.0);
+    // Stop later hits replacing this dent; dents heal even while a Snowman is held.
+    assert!(simulation.grab(id, target.center + V2::new(0.0, target.hop_offset)));
+    run(&mut simulation, 2.5, AWAY);
+    let target = simulation.snowmen().iter().find(|m| m.id == id).unwrap();
+    assert!((target.dents[circle].unwrap().remaining - 2.5).abs() < DT * 2.0);
+    let mut sprites = [Sprite::default(); 6];
+    simulation.write_snowmen(&mut sprites);
+    let index = simulation.snowmen().iter().position(|m| m.id == id).unwrap() * 3 + circle;
+    assert!((sprites[index].lump - 0.5).abs() < 0.01);
+    assert_eq!(sprites[index].tint, [dent.direction.x, dent.direction.y, dent.radius]);
+    run(&mut simulation, 2.5 + DT * 2.0, AWAY);
+    assert!(simulation.snowmen().iter().find(|m| m.id == id).unwrap().dents[circle].is_none());
+}
+
+#[test]
+fn a_winding_up_snowman_draws_and_grabs_the_same_circles() {
+    let mut simulation = fight_scene(&[300.0, 900.0]);
+    wait_for_fight(&mut simulation, 30);
+    let before = simulation.snowmen()[0];
+    simulation.step(0.1, AWAY);
+    let winding = simulation.snowmen()[0];
+    let mut sprites = [Sprite::default(); 6];
+    assert_eq!(simulation.write_snowmen(&mut sprites), 6);
+    for (sprite, (center, radius)) in sprites.iter().zip(winding.circles()) {
+        assert_eq!(sprite.position, center);
+        assert_eq!(sprite.size, radius * 2.0);
+        assert_eq!(simulation.snowman_at(center), Some(winding.id));
+    }
+    assert_eq!(winding.area(), before.area());
+    assert!(winding.circles()[2].0.x < before.circles()[2].0.x);
+    assert!(winding.circles()[2].1 < before.circles()[2].1);
+    assert!(simulation.grab(winding.id, winding.circles()[2].0));
+    assert!(simulation.fight_turn().is_none());
+
+    // A real thrown ball can still break a fighter, returning its full unsquashed area.
+    let mut simulation = fight_scene(&[300.0, 900.0]);
+    wait_for_fight(&mut simulation, 30);
+    simulation.step(0.1, AWAY);
+    let (center, radius) = simulation.snowmen()[0].circles()[2];
+    let mut thrown = flight_ball(center - V2::new(radius + 10.0, 0.0), 6.0);
+    thrown.velocity = V2::new(1200.0, 0.0);
+    simulation.bring_snowball(thrown);
+    let area = simulation.snow_area();
+    simulation.step(DT, AWAY);
+    assert_eq!(simulation.snowmen().len(), 1);
+    assert!(simulation.fight_turn().is_none());
+    assert!((simulation.snow_area() - area).abs() < 0.01);
+}
+
+#[test]
+fn fight_balls_ignore_empty_windows_and_hits_and_misses_make_cosmetic_puffs() {
+    let mut saw_hit = false;
+    let mut saw_miss = false;
+    for seed in [33, 40] {
+        let mut simulation = fight_scene(&[300.0, 900.0]);
+        // An empty window crosses the arc, but only Piles and the Ground stop these balls.
+        simulation.update_windows(&[surface(7, 100.0, 200.0, 1000.0)], DT, &HashSet::new(), &HashSet::new(), false);
+        simulation.seed_random(seed);
+        wait_for_fight(&mut simulation, 30);
+        // Look at the first resolution, before any other puff exists.
+        let mut puff_count = 0;
+        for _ in 0..480 {
+            simulation.step(1.0 / 240.0, AWAY);
+            let mut sprites = vec![Sprite::default(); simulation.sprite_count()];
+            simulation.write_sprites(&mut sprites);
+            for sprite in &sprites {
+                assert_eq!(simulation.snowball_at(sprite.position), None, "a fight effect must not be grabbable");
+            }
+            puff_count = sprites.iter().filter(|s| s.ball == 0.0).count();
+            if puff_count > 0 {
+                let hit = simulation.snowmen().iter().any(|m| m.dents.iter().any(Option::is_some));
+                assert_eq!(puff_count, if hit { 26 } else { 14 });
+                saw_hit |= hit;
+                saw_miss |= !hit;
+                break;
+            }
+        }
+        assert!(puff_count > 0);
+        assert_eq!(piles(&simulation).iter().map(|(_, area)| area).sum::<f32>(), 0.0);
+    }
+    assert!(saw_hit && saw_miss, "the seeded throws must exercise both hits and misses");
+}
+
+#[test]
+fn a_fighters_ledge_moving_or_disappearing_ends_the_fight_at_once() {
+    for disappears in [false, true] {
+        let mut simulation = fight_scene(&[300.0, 900.0]);
+        simulation.update_windows(&[surface(7, 100.0, 300.0, 1000.0)], DT, &HashSet::new(), &HashSet::new(), false);
+        let mut man = simulation.take_snowman(simulation.snowmen()[0].id).unwrap();
+        man.center.y += 300.0;
+        man.state = SnowballState::Falling;
+        simulation.bring_snowman(man);
+        run(&mut simulation, 1.0, AWAY);
+        assert_eq!(simulation.snowmen()[1].surface(), Some(Surface::Ledge(7)));
+        run(&mut simulation, 180.0, AWAY);
+        assert!(simulation.fight_turn().is_some());
+        if disappears {
+            simulation.update_windows(&[], DT, &HashSet::new(), &HashSet::new(), false);
+        } else {
+            simulation.update_windows(&[surface(7, 101.0, 300.0, 1000.0)], 0.5, &HashSet::new(), &HashSet::new(), false);
+        }
+        assert!(simulation.fight_turn().is_none());
+    }
+}
+
+#[test]
+fn disabling_snowballs_and_clearing_snow_remove_fight_effects() {
+    for clear in [false, true] {
+        let mut simulation = fight_scene(&[300.0, 900.0]);
+        wait_for_fight(&mut simulation, 30);
+        run(&mut simulation, 0.4, AWAY);
+        assert!(simulation.sprite_count() > 0);
+        if clear {
+            simulation.blow_away(1.0, true);
+        } else {
+            let area = simulation.snow_area();
+            simulation.set_snowballs(false);
+            assert!((simulation.snow_area() - area).abs() < 0.01, "snow area {area} -> {}", simulation.snow_area());
+        }
+        assert!(simulation.fight_turn().is_none());
+        assert!(simulation.snowmen().is_empty());
+        assert_eq!(simulation.sprite_count(), 0);
+    }
+}
+
 #[test]
 fn three_ordered_balls_form_one_snowman_with_their_exact_area_and_a_new_id() {
     let mut simulation = bare_play();
