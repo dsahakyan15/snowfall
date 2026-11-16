@@ -138,7 +138,16 @@ impl Spill {
                 let edge = (self.position.y / (self.radius * 2.0)).clamp(0.0, 1.0);
                 (self.radius * (1.0 + t * 0.25), (1.0 - t) * edge)
             }
-            PloughKind::Blower => (self.radius + self.age * 5.0, 1.0 - t),
+            // Thrown snow is loose powder: soft white flakes, not packed lumps.
+            PloughKind::Blower => {
+                return Sprite {
+                    position: self.position,
+                    size: (self.radius + self.age * 3.0) * 2.0,
+                    alpha: opacity * (1.0 - t) * 0.9,
+                    soft: 0.6,
+                    ..Sprite::default()
+                };
+            }
         };
         Sprite { position: self.position, size: radius * 2.0, alpha: opacity * fade, ball: 1.0, angle: self.angle, ..Sprite::default() }
     }
@@ -220,7 +229,8 @@ impl Plough {
                 ),
                 PloughKind::Blower => (
                     V2::new(blade - direction * 38.0, 82.5),
-                    V2::new(direction * random.range(-25.0, 25.0), random.range(170.0, 240.0)),
+                    // It moves on with the machine, so the plume rises over the chute instead of trailing onto the roof.
+                    V2::new(direction * (SPEED + random.range(-25.0, 25.0)), random.range(170.0, 240.0)),
                     random.range(1.5, 2.8),
                     2.0,
                 ),
@@ -302,7 +312,8 @@ mod tests {
                     PloughKind::Blower => {
                         assert!((1.5..=2.8).contains(&p.radius));
                         assert!((170.0..=240.0).contains(&p.velocity.y));
-                        assert!(p.velocity.x.abs() <= 25.0);
+                        // Thrown along with the machine, give or take a little.
+                        assert!((p.velocity.x.abs() - SPEED).abs() <= 25.0);
                         assert_eq!(p.position.y, 82.5);
                     }
                 }
@@ -313,7 +324,9 @@ mod tests {
             plough.running = None;
             plough.advance(&mut ground, 0.05, &mut random);
             let after = plough.particles[0].sprite(1.0);
-            assert!(after.size > before.size && after.alpha < before.alpha && after.angle != before.angle);
+            assert!(after.size > before.size && after.alpha < before.alpha);
+            // Only packed lumps tumble; blown powder has no turn to show.
+            assert!(kind == PloughKind::Blower || after.angle != before.angle);
             for _ in 0..240 {
                 plough.advance(&mut ground, 1.0 / 120.0, &mut random);
             }

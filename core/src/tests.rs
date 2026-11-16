@@ -2140,7 +2140,8 @@ fn snowplough_spills_excess_snow_and_finishes_its_particles_after_the_pass() {
                 assert!(simulation.ploughed_area() > 0.0, "spill must count as removed snow immediately");
                 let count = simulation.write_sprites(&mut sprites);
                 assert_eq!(count, simulation.plough_spill_count());
-                assert!(sprites[..count].iter().all(|s| s.ball == 1.0 && s.alpha >= 0.0 && s.alpha <= 1.0));
+                // Blade lumps are packed balls; blower snow is soft powder.
+                assert!(sprites[..count].iter().all(|s| (s.ball == 1.0 || (s.ball == 0.0 && s.soft > 0.0)) && s.alpha >= 0.0 && s.alpha <= 1.0));
                 assert!(sprites[..count].iter().all(|s| simulation.snowball_at(s.position).is_none()));
                 saw_spill = true;
             }
