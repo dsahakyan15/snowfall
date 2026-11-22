@@ -178,7 +178,7 @@ impl Snowman {
         self.grab_offset = base.grab_offset;
     }
 
-    fn parts(&self) -> [Snowball; 3] {
+    pub(crate) fn parts(&self) -> [Snowball; 3] {
         let circles = self.circles();
         std::array::from_fn(|i| Snowball { center: circles[i].0, radius: self.radii[i], ..self.base_ball() })
     }

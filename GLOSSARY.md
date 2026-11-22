@@ -26,6 +26,9 @@ Two Snowballs resting one above the other. A soft drop stacks on a resting ball 
 **Snowman**:
 Three stacked Snowballs, with non-increasing radii from bottom to top, joined into one entity with a coal face, carrot nose, red knitted scarf and buttons. It keeps their snow area, rides its Ledge, hops on fast window motion, and can be carried and thrown. Losing its Ledge lets it fall safely; a hard thrown Snowball breaks both back into loose snow.
 
+**Yeti**:
+A furry visitor that walks along the Ground and kicks apart a Snowman into loose snow. Moving or carrying its chosen Snowman to safety makes it look around and leave; Snowmen on Ledges are safe.
+
 **Ledge**:
 The top edge of a window, which can carry a Pile.
 _Avoid_: window top, shelf, surface

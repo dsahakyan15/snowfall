@@ -329,6 +329,11 @@ fn choose(window: HWND, action: Action) {
                 send(app, Command::SendSnowplough);
             }
         }),
+        Action::SendYeti => APP.with_borrow(|app| {
+            if let Some(app) = app {
+                send(app, Command::SendYeti);
+            }
+        }),
         Action::ClearSnow => APP.with_borrow(|app| {
             if let Some(app) = app {
                 send(app, Command::ClearSnow(!animations_enabled()));

@@ -346,3 +346,103 @@ float4 ploughFragment(PloughOut i) : SV_Target {
     }
     return color;
 }
+
+// Yeti borrows origin = feet, pileTop = facing, pileBottom = seconds in this pose,
+// time = visit seconds, columnCount = YetiState (arrive, wind-up, kick, cheer, confused, leave).
+// It has no instance sprites or hit region; the whole visitor is this one quad.
+PloughOut yetiVertex(uint id : SV_VertexID) {
+    float2 corner = float2(float(id & 1), float(id >> 1));
+    PloughOut o;
+    o.local = lerp(float2(-74.0, -6.0), float2(83.0, 148.0), corner);
+    float2 world = origin + float2(o.local.x * pileTop, o.local.y);
+    o.position = float4(world / viewSize * 2.0 - 1.0, 0.0, 1.0);
+    return o;
+}
+
+float yetiEllipse(float2 p, float2 center, float2 radii) {
+    return (length((p - center) / radii) - 1.0) * min(radii.x, radii.y);
+}
+
+float yetiFur(float2 p, float2 center, float2 radii) {
+    float2 q = (p - center) / radii;
+    float angle = atan2(q.y, q.x);
+    float fringe = 0.8 * sin(angle * 17.0) + 0.45 * sin(angle * 29.0 + 0.6);
+    return (length(q) - 1.0) * min(radii.x, radii.y) - fringe;
+}
+
+float yetiLimb(float2 p, float2 a, float2 b, float radius) {
+    return ploughLine(p, a, b) - radius - 0.65 * sin(p.x * 1.7) - 0.4 * sin(p.y * 2.1);
+}
+
+float4 yetiFragment(PloughOut i) : SV_Target {
+    bool walking = columnCount == 0 || columnCount == 5;
+    bool winding = columnCount == 1;
+    bool kicking = columnCount == 2;
+    bool cheering = columnCount == 3;
+    bool confused = columnCount == 4;
+    float gait = time * 7.5;
+    float bob = walking ? 1.8 + 1.8 * sin(gait * 2.0) : 0.0;
+    float2 p = i.local - float2(0.0, bob);
+    float4 color = 0.0;
+    float shadow = exp(-dot(i.local / float2(36.0, 4.0), i.local / float2(36.0, 4.0))) * 0.22;
+    color = float4(float3(0.25, 0.32, 0.42) * shadow, shadow);
+    // White crown and cool shaded underside, with the same soft edge on every furry part.
+    float3 fur = lerp(float3(0.788, 0.847, 0.918), 1.0, saturate(0.15 + p.y / 125.0));
+    float3 sole = float3(0.47, 0.58, 0.68);
+    float3 ink = float3(0.12, 0.19, 0.25);
+    float rearAngle = walking ? -sin(gait) * 0.48 : -0.08;
+    float frontAngle = walking ? sin(gait) * 0.48 : 0.08;
+    if (winding) frontAngle = lerp(0.08, -0.85, smoothstep(0.0, 0.45, pileBottom));
+    if (kicking) frontAngle = lerp(-0.85, 1.45, smoothstep(0.0, 0.18, pileBottom));
+    if (cheering) frontAngle = lerp(1.45, 0.08, smoothstep(0.0, 0.2, pileBottom));
+    float2 rearFoot = float2(-12.0, 31.0) + float2(sin(rearAngle), -cos(rearAngle)) * 23.0;
+    float2 frontFoot = float2(12.0, 31.0) + float2(sin(frontAngle), -cos(frontAngle)) * 23.0;
+    ploughPaint(color, fur * 0.95, yetiLimb(p, float2(-12.0, 31.0), rearFoot, 9.0), 1.0);
+    ploughPaint(color, sole, yetiEllipse(p, rearFoot + float2(3.0, -4.0), float2(12.0, 4.0)), 1.0);
+    // The far arm swings opposite its leg; cheering lifts both hands above the head.
+    float swing = walking ? sin(gait) * 10.0 : 0.0;
+    float2 rearHand = float2(-34.0 - swing * 0.3, 51.0 + swing);
+    float2 frontHand = float2(34.0 + swing * 0.3, 51.0 - swing);
+    if (winding || kicking) frontHand = float2(39.0, 73.0);
+    if (confused) {
+        rearHand = float2(-40.0, 87.0);
+        frontHand = float2(40.0, 87.0);
+    }
+    if (cheering) {
+        rearHand = float2(-39.0, 115.0 + sin(time * 13.0) * 3.0);
+        frontHand = float2(39.0, 115.0 - sin(time * 13.0) * 3.0);
+    }
+    ploughPaint(color, fur * 0.95, yetiLimb(p, float2(-23.0, 77.0), rearHand, 8.0), 1.0);
+    ploughPaint(color, fur, yetiFur(p, float2(0.0, 58.0), float2(30.0, 38.0)), 1.0);
+    // A faint belly highlight keeps the body round without adding another outline.
+    ploughPaint(color, 1.0, yetiEllipse(p, float2(4.0, 60.0), float2(21.0, 27.0)), 0.17);
+    ploughPaint(color, fur, yetiLimb(p, float2(12.0, 31.0), frontFoot, 9.5), 1.0);
+    ploughPaint(color, sole, yetiEllipse(p, frontFoot + float2(4.0, -4.0), float2(13.0, 4.0)), 1.0);
+    ploughPaint(color, fur, yetiLimb(p, float2(23.0, 77.0), frontHand, 8.5), 1.0);
+    ploughPaint(color, fur, yetiFur(p, float2(4.0, 106.0), float2(21.0, 19.0)), 1.0);
+    ploughPaint(color, float3(0.72, 0.81, 0.86), yetiEllipse(p, float2(10.0, 105.5), float2(15.0, 13.5)), 1.0);
+    float blink = 1.0 - smoothstep(0.015, 0.09, abs(fmod(time + 1.35, 5.6) - 2.8));
+    float eyeHeight = lerp(2.6, 0.35, blink);
+    ploughPaint(color, ink, yetiEllipse(p, float2(3.5, 110.0), float2(2.0, eyeHeight)), 1.0);
+    ploughPaint(color, ink, yetiEllipse(p, float2(16.0, 110.0), float2(2.0, eyeHeight)), 1.0);
+    float brow = confused ? 3.0 : (winding ? -1.0 : 0.5);
+    ploughPaint(color, sole, ploughLine(p, float2(0.5, 115.0), float2(6.0, 115.0 + brow)) - 0.8, 1.0);
+    ploughPaint(color, sole, ploughLine(p, float2(13.5, 115.0 + brow), float2(19.0, 115.0)) - 0.8, 1.0);
+    bool openMouth = winding || kicking || cheering;
+    float2 mouthRadii = openMouth ? float2(5.5, 5.0) : (confused ? float2(2.5, 3.0) : float2(4.0, 1.2));
+    ploughPaint(color, ink, yetiEllipse(p, float2(10.0, 99.5), mouthRadii), 1.0);
+    if (openMouth) {
+        ploughPaint(color, 1.0, ploughBox(p, float2(7.5, 102.0), float2(1.2, 1.8), 0.5), 1.0);
+        ploughPaint(color, 1.0, ploughBox(p, float2(12.5, 102.0), float2(1.2, 1.8), 0.5), 1.0);
+    }
+    if (confused) {
+        // A small hand-drawn question mark is decorative and carries no snow area.
+        float2 q = p - float2(39.0, 130.0);
+        float question = max(abs(length(q - float2(0.0, 4.0)) - 4.5) - 1.0, -q.y);
+        question = min(question, ploughLine(q, float2(4.0, 2.0), float2(0.0, -2.0)) - 1.0);
+        question = min(question, ploughLine(q, float2(0.0, -2.0), float2(0.0, -4.0)) - 1.0);
+        question = min(question, length(q - float2(0.0, -8.0)) - 1.3);
+        ploughPaint(color, sole, question, smoothstep(0.05, 0.3, pileBottom));
+    }
+    return color;
+}

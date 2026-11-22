@@ -9,6 +9,7 @@ pub enum Action {
     Change(Change),
     ClearSnow,
     SendSnowplough,
+    SendYeti,
     CheckForUpdates,
     Quit,
 }
@@ -66,6 +67,7 @@ pub fn build(settings: &Settings, context: &Context) -> Vec<Item> {
         submenu(text.opacity, true, choices(&Opacity::ALL, settings.opacity, |o| format!("{}%", o.percent()), Change::Opacity)),
         command(text.clear_snow, Action::ClearSnow, true),
         command(text.send_snowplough, Action::SendSnowplough, true),
+        command(text.send_yeti, Action::SendYeti, true),
         Item::Separator,
         toggle(text.behind_windows, behind, Change::BehindWindows, true),
         toggle(text.keep_windows_clear, settings.keep_windows_clear, Change::KeepWindowsClear, true),
@@ -200,6 +202,7 @@ mod tests {
                 "Opacity",
                 "Clear snow",
                 "Send snowplough",
+                "Send yeti",
                 "Behind windows",
                 "Keep windows clear",
                 "Snowballs",
@@ -222,6 +225,7 @@ mod tests {
         assert!(labels.contains(&"Снежки"));
         assert!(labels.contains(&"Чистить панель задач"));
         assert!(labels.contains(&"Вызвать снегоочиститель"));
+        assert!(labels.contains(&"Позвать йети"));
         assert_eq!(labels[0], "Снегопад");
         assert_eq!(labels.last(), Some(&"Выход"));
         assert!(labels.iter().all(|label| !label.contains("Quit")));
@@ -278,6 +282,18 @@ mod tests {
         assert_eq!(action, &Action::Change(Change::Melt(false)));
         let Item::Command { action, .. } = find(&menu, "Behind windows") else { panic!() };
         assert_eq!(action, &Action::Change(Change::BehindWindows(true)));
+    }
+
+    #[test]
+    fn send_yeti_is_an_enabled_command_in_both_languages() {
+        for language in [Language::English, Language::Russian] {
+            let menu = build(&Settings::default(), &context(language));
+            let item = find(&menu, language.strings().send_yeti);
+            let Item::Command { action, radio, .. } = item else { panic!() };
+            assert_eq!(action, &Action::SendYeti);
+            assert_eq!(state(item), (false, true));
+            assert!(!radio);
+        }
     }
 
     #[test]
