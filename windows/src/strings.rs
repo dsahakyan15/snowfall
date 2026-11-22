@@ -22,6 +22,7 @@ impl Language {
 }
 
 pub struct Strings {
+    pub open_snowfall: &'static str,
     pub snowfall: &'static str,
     pub off: &'static str,
     pub snow: &'static str,
@@ -65,6 +66,7 @@ pub struct Strings {
 }
 
 pub const ENGLISH: Strings = Strings {
+    open_snowfall: "Open Snowfall…",
     snowfall: "Snowfall",
     off: "Off",
     snow: "Snow",
@@ -101,6 +103,7 @@ pub const ENGLISH: Strings = Strings {
 };
 
 pub const RUSSIAN: Strings = Strings {
+    open_snowfall: "Открыть Snowfall…",
     snowfall: "Снегопад",
     off: "Выключен",
     snow: "Снег",
@@ -134,6 +137,107 @@ pub const RUSSIAN: Strings = Strings {
     update_available: "Доступен Snowfall {version}. Нажмите, чтобы скачать.",
     up_to_date: "У вас последняя версия Snowfall.",
     update_failed: "Не удалось связаться с GitHub, чтобы проверить обновления.",
+};
+
+/// Copy for the settings window; setting names and choices still come from the menu.
+pub struct WindowStrings {
+    pub tabs: [&'static str; 5],
+    pub explanations: [&'static str; 13],
+    pub full_screen: &'static str,
+    pub updates: &'static str,
+    pub buttons: [&'static str; 4],
+    pub levels: [&'static str; 3],
+    pub theme_heading: &'static str,
+    pub themes: [&'static str; 3],
+    pub theme_hint: &'static str,
+    pub snow_opacity: &'static str,
+    pub snowplough: &'static str,
+    pub primary: &'static str,
+    pub clear_hint: &'static str,
+    pub plough_hint: &'static str,
+    pub yeti: &'static str,
+    pub yeti_hint: &'static str,
+    pub installed: &'static str,
+    pub quit_hint: &'static str,
+}
+
+impl Language {
+    pub fn window_strings(self) -> &'static WindowStrings {
+        match self {
+            Language::English => &WINDOW_ENGLISH,
+            Language::Russian => &WINDOW_RUSSIAN,
+        }
+    }
+}
+
+const WINDOW_ENGLISH: WindowStrings = WindowStrings {
+    tabs: ["Snow", "Windows", "Snow play", "Appearance", "System"],
+    explanations: [
+        "How much snow falls",
+        "Blows the flakes and sweeps snow off edges",
+        "How solid the snow looks.",
+        "Which monitors get snow.",
+        "Snow slowly melts when it hasn't snowed for a while.",
+        "Snow only on the wallpaper, windows stay on top.",
+        "Snow doesn't build up on window tops.",
+        "Snow keeps falling over full-screen games and video.",
+        "Otherwise snow stays out of screenshots and screen recordings.",
+        "Roll a snowball out of a drift with the mouse, throw it, build snowmen.",
+        "Now and then a snowplough clears deep snow.",
+        "Snow freezes while the laptop runs on battery.",
+        "Snowfall starts with Windows.",
+    ],
+    full_screen: "Show over full-screen windows",
+    updates: "Updates",
+    buttons: ["Clear", "Send", "Check", "Call"],
+    levels: ["Off", "Snow", "Heavy"],
+    theme_heading: "Window theme",
+    themes: ["Auto", "Light", "Dark"],
+    theme_hint: "Auto follows the Windows theme.",
+    snow_opacity: "Snow opacity",
+    snowplough: "Snowplough",
+    primary: "main",
+    clear_hint: "Clear all settled snow now",
+    plough_hint: "Drives along the taskbar",
+    yeti: "Yeti",
+    yeti_hint: "Comes for a Snowman on the taskbar",
+    installed: "Installed: {version}",
+    quit_hint: "Quit: right-click the tray icon",
+};
+
+const WINDOW_RUSSIAN: WindowStrings = WindowStrings {
+    tabs: ["Снег", "Окна", "Игра", "Вид", "Система"],
+    explanations: [
+        "Сколько снега падает",
+        "Сносит снежинки и сдувает снег с краёв",
+        "Насколько плотно выглядит снег.",
+        "На каких мониторах идёт снег.",
+        "Снег медленно тает, если давно не шёл.",
+        "Снег только на обоях, окна поверх него.",
+        "Снег не копится на верхних краях окон.",
+        "Снег идёт и над играми и видео во весь экран.",
+        "Иначе снег не попадает в скриншоты и запись экрана.",
+        "Скатайте снежок из сугроба мышью, бросайте, лепите снеговиков.",
+        "Иногда приезжает снегоочиститель и убирает глубокий снег.",
+        "Снег замирает, когда ноутбук работает от батареи.",
+        "Snowfall стартует вместе с Windows.",
+    ],
+    full_screen: "Поверх полноэкранных окон",
+    updates: "Обновления",
+    buttons: ["Убрать", "Вызвать", "Проверить", "Позвать"],
+    levels: ["Нет", "Снег", "Сильный"],
+    theme_heading: "Тема окна",
+    themes: ["Авто", "Светлая", "Тёмная"],
+    theme_hint: "«Авто» следует теме Windows.",
+    snow_opacity: "Непрозрачность снега",
+    snowplough: "Снегоочиститель",
+    primary: "основной",
+    clear_hint: "Сразу очистить весь лежащий снег",
+    plough_hint: "Проедет по панели задач",
+    yeti: "Йети",
+    yeti_hint: "Придёт за снеговиком на панели задач",
+    installed: "Установлена версия {version}",
+    quit_hint: "Выход — правый клик по значку",
 };
 
 #[cfg(test)]
