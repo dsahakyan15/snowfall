@@ -683,7 +683,7 @@ impl SnowSimulation {
 
     /// The last airborne sprites spill in front of the Snowplough.
     pub fn plough_spill_count(&self) -> usize {
-        self.plough.particles.len()
+        self.plough.particles.len() + self.plough.running.iter().flat_map(|plough| plough.clumps.iter().flatten()).count()
     }
 
     /// Floats the renderer needs per frame: each layer's surface and bed.
@@ -895,7 +895,8 @@ impl SnowSimulation {
             ..Sprite::default()
         });
         let spill = self.plough.particles.iter().map(|particle| particle.sprite(self.opacity));
-        for (slot, sprite) in buffer.iter_mut().zip(flakes.chain(grains).chain(motes).chain(projectiles).chain(puffs).chain(spill)) {
+        let clumps = self.plough.running.iter().flat_map(|plough| plough.clumps.iter().flatten()).map(|clump| clump.sprite(self.opacity));
+        for (slot, sprite) in buffer.iter_mut().zip(flakes.chain(grains).chain(motes).chain(projectiles).chain(puffs).chain(spill).chain(clumps)) {
             *slot = sprite;
             count += 1;
         }

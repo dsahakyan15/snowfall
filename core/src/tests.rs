@@ -2123,31 +2123,34 @@ fn snowplough_spills_excess_snow_and_finishes_its_particles_after_the_pass() {
         let start = simulation.snowplough().unwrap().x;
         simulation.send_snowplough();
         assert_eq!(simulation.snowplough().unwrap().x, start);
-        let mut saw_mound = false;
         let mut saw_spill = false;
-        let mut sprites = [Sprite::default(); 160];
-        for frame in 0..1000 {
+        let mut saw_clumps = false;
+        let mut sprites = [Sprite::default(); 184];
+        for frame in 0..1600 {
             assert!(simulation.step(DT, AWAY));
             let area = simulation.snow_area() as f64;
             assert!((before - area - simulation.ploughed_area()).abs() < 1.0, "unaccounted snow: {before} - {area} - {}", simulation.ploughed_area());
             let Some(plough) = simulation.snowplough() else { break };
             assert_eq!(simulation.pace(), Pace::Lively);
-            let cap = plough.kind.mound_cap();
-            saw_mound |= plough.snow_height > cap - 0.1;
-            assert!(plough.snow_height <= cap);
-            assert!(simulation.plough_spill_count() <= 160);
+            assert_eq!(plough.snow_height, 0.0, "Ground deeper than the cap needs no added mound");
+            assert!(simulation.plough_spill_count() <= 184);
+            let clumps = plough.clumps.iter().flatten().count();
+            saw_clumps |= clumps > 0;
             if simulation.plough_spill_count() > 0 {
                 assert!(simulation.ploughed_area() > 0.0, "spill must count as removed snow immediately");
                 let count = simulation.write_sprites(&mut sprites);
                 assert_eq!(count, simulation.plough_spill_count());
+                assert_eq!(count, simulation.sprite_count(), "the renderer must reserve space for every clump");
+                assert!(sprites[count - clumps..count].iter().all(|s| s.ball == 1.0));
                 // Blade lumps are packed balls; blower snow is soft powder.
                 assert!(sprites[..count].iter().all(|s| (s.ball == 1.0 || (s.ball == 0.0 && s.soft > 0.0)) && s.alpha >= 0.0 && s.alpha <= 1.0));
                 assert!(sprites[..count].iter().all(|s| simulation.snowball_at(s.position).is_none()));
                 saw_spill = true;
             }
-            assert!(frame < 999, "the Snowplough never left");
+            assert!(frame < 1599, "the loaded Snowplough never left");
         }
-        assert!(saw_mound && saw_spill, "snow must build up and visibly leave the Ground");
+        assert!(saw_spill, "scraped deep snow must visibly leave the Ground immediately");
+        assert!(saw_clumps, "collapsing snow should draw rolling clumps");
         assert!(simulation.snowplough().is_none());
         assert!(simulation.snow_area() / simulation.width() < 2.0);
         if seed == 2 << 33 || seed == 3 << 33 {
@@ -2173,7 +2176,7 @@ fn snowplough_spills_excess_snow_and_finishes_its_particles_after_the_pass() {
 #[test]
 fn snowplough_accounts_for_ground_and_whole_snow_play_exactly() {
     let man = build_snowman(&mut bare_play(), 0.0);
-    for depth in [26.0, 60.0] {
+    for depth in [8.0, 26.0, 60.0, 95.0, 140.0] {
         for kind in [PloughKind::Blade, PloughKind::Blower] {
             for direction in [1.0, -1.0] {
                 let mut ground = SnowLayer::new(V2::ZERO, 641, 2.0, 40.0, false, (0.0, 0.0));
@@ -2200,11 +2203,14 @@ fn snowplough_accounts_for_ground_and_whole_snow_play_exactly() {
                     direction,
                     distance: 0.0,
                     elapsed: 0.0,
+                    load: 0.0,
                     snow_height: 0.0,
                     mound: Vec::new(),
+                    clumps: [None; crate::plough::MAX_CLUMPS],
+                    clump_snow: 0.0,
                 };
                 let mut removed = 0.0;
-                for _ in 0..800 {
+                for _ in 0..1600 {
                     removed += plough.advance(&mut ground, DT);
                     removed += play.plough(&plough, &ground, 1280.0);
                     assert_eq!(before, area(&ground, &play) + removed, "snow changed: {depth}, {kind:?}, {direction}");
@@ -2441,8 +2447,11 @@ fn snowplough_leaves_held_falling_and_ledge_snow_play_untouched() {
             direction: 1.0,
             distance: 544.0,
             elapsed: 4.0,
+            load: 0.0,
             snow_height: 0.0,
             mound: Vec::new(),
+            clumps: [None; crate::plough::MAX_CLUMPS],
+            clump_snow: 0.0,
         };
         assert_eq!(play.plough(&plough, &ground, 1280.0), 0.0);
         assert_eq!(play.balls[0].state, state);
