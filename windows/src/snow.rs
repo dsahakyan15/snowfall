@@ -41,6 +41,7 @@ pub enum Command {
     /// Blows all the snow away; when calm, for less motion, melts it where it lies instead.
     ClearSnow(bool),
     SendSnowplough,
+    SendYeti,
     Quit,
 }
 
@@ -136,6 +137,18 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
                     if let Some(screen) = screens.iter_mut().find(|screen| screen.monitor.primary) {
                         screen.simulation.send_snowplough();
                         screen.wake(Clock::now());
+                    }
+                }
+                Command::SendYeti => {
+                    // Snow play belongs to each screen. Prefer the main screen, falling back
+                    // to a screen with a target instead of walking between displays.
+                    let target = screens
+                        .iter()
+                        .position(|screen| screen.monitor.primary && screen.simulation.has_ground_snowman())
+                        .or_else(|| screens.iter().position(|screen| screen.simulation.has_ground_snowman()));
+                    if let Some(i) = target {
+                        screens[i].simulation.send_yeti();
+                        screens[i].wake(Clock::now());
                     }
                 }
                 Command::ClearSnow(calm) => {

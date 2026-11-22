@@ -5,6 +5,7 @@ pub mod layer;
 pub mod play;
 pub mod plough;
 pub mod simulation;
+pub mod yeti;
 
 #[cfg(test)]
 mod tests;

@@ -8,6 +8,7 @@ use crate::geometry::{Rect, V2, smoothstep};
 use crate::layer::{SnowLayer, sample};
 use crate::play::{FIGHT_BALL_RADIUS, SnowPlay, Snowball, SnowballId, SnowballState, Snowman, Surface};
 use crate::plough::{Plough, Snowplough};
+use crate::yeti::{Yeti, YetiVisits};
 
 pub type WindowId = isize;
 
@@ -361,6 +362,7 @@ pub struct SnowSimulation {
     target_flakes: usize,
     play: SnowPlay,
     plough: Plough,
+    yeti: YetiVisits,
     air: Air,
 }
 
@@ -391,6 +393,7 @@ impl SnowSimulation {
             target_flakes: 0,
             play: SnowPlay::new(),
             plough: Plough::new(),
+            yeti: YetiVisits::new(Random::new()),
             air: Air {
                 flakes: Vec::new(),
                 grains: Vec::new(),
@@ -422,6 +425,7 @@ impl SnowSimulation {
     #[cfg(test)]
     pub(crate) fn seed_random(&mut self, seed: u64) {
         self.air.random = Random::seeded(seed);
+        self.yeti.seed_random(seed);
     }
 
     pub fn height(&self) -> f32 {
@@ -511,6 +515,26 @@ impl SnowSimulation {
         self.plough.running.as_ref()
     }
 
+    /// Unlike the Snowplough, a Yeti can visit any screen with a Ground Snowman.
+    pub fn has_ground_snowman(&self) -> bool {
+        self.play.snowmen.iter().any(|man| man.surface() == Some(Surface::Ground))
+    }
+
+    /// Sends one visitor on this screen; a missing target or an active Clear snow makes this a no-op.
+    pub fn send_yeti(&mut self) {
+        if self.air.gust.is_none() {
+            self.yeti.send(&self.play.snowmen, self.width);
+            if self.yeti.running.is_some() {
+                self.pace = Pace::Lively;
+                self.air.windows_changed = true;
+            }
+        }
+    }
+
+    pub fn yeti(&self) -> Option<&Yeti> {
+        self.yeti.running.as_ref()
+    }
+
     #[cfg(test)]
     pub(crate) fn ploughed_area(&self) -> f64 {
         self.plough.removed_area
@@ -552,6 +576,7 @@ impl SnowSimulation {
 
     pub fn take_snowman(&mut self, id: SnowballId) -> Option<Snowman> {
         let i = self.play.snowmen.iter().position(|m| m.id == id)?;
+        self.yeti.rescue(id);
         self.play.disturb(id);
         self.air.windows_changed = true;
         Some(self.play.snowmen.remove(i))
@@ -587,6 +612,7 @@ impl SnowSimulation {
         if (self.snowball_at(point) != Some(id) && self.snowman_at(point) != Some(id)) || !self.play.grab(id, point) {
             return false;
         }
+        self.yeti.rescue(id);
         self.air.windows_changed = true;
         true
     }
@@ -663,6 +689,7 @@ impl SnowSimulation {
             && self.sprite_count() == 0
             && self.play.is_empty()
             && self.plough.running.is_none()
+            && self.yeti.running.is_none()
             && self.air.gust.is_none()
             && self.air.overflow.is_empty()
             && self.dormant.is_empty()
@@ -708,8 +735,9 @@ impl SnowSimulation {
         self.air.clock += dt as f64;
         if self.air.gust.is_none() {
             self.plough.wait(&self.layers[0], GROUND_DEPTH, dt, &mut self.air.random);
+            self.yeti.wait(&self.play.snowmen, self.width, dt);
         }
-        let was_moving = self.sprite_count() > 0;
+        let was_moving = self.sprite_count() > 0 || self.yeti.running.is_some();
         self.air.heights_changed = false;
 
         let wind = self.air.slide_wind;
@@ -767,6 +795,20 @@ impl SnowSimulation {
             }
         }
 
+        if let Some((id, direction)) = self.yeti.advance(&self.play.snowmen, self.width, dt)
+            && let Some(i) = self.play.snowmen.iter().position(|man| man.id == id)
+        {
+            self.play.disturb(id);
+            let man = self.play.snowmen.remove(i);
+            // Use the hard-hit path's exact three areas. Its quarter-velocity impulse sends
+            // every grain forward and upward, while the rest returns directly to the Pile.
+            for mut ball in man.parts() {
+                ball.velocity = V2::new(direction * 1200.0, 1200.0);
+                self.air.break_snowball(&ball, &mut self.layers, self.width);
+            }
+            self.air.heights_changed = true;
+        }
+
         for layer in &mut self.layers {
             layer.refresh_top();
             layer.previous_base_y = layer.base().y;
@@ -776,6 +818,7 @@ impl SnowSimulation {
         let pushed = air.clock - air.last_window_motion < 0.6 || air.clock - air.last_cursor_push < 0.3 || air.gust.is_some() || self.play.active();
         // The steady trickle off window corners is a few tiny grains at a time; they read fine at the calm rate.
         let flying = self.plough.running.is_some()
+            || self.yeti.running.is_some()
             || !self.plough.particles.is_empty()
             || air.grains.len() > 24
             || air.slide_wind.abs() > 20.0
@@ -1441,6 +1484,7 @@ impl SnowSimulation {
     pub fn blow_away(&mut self, direction: f32, calm: bool) {
         // Clear snow ends the visit too; its usual gust takes the mound with the rest.
         self.plough.stop();
+        self.yeti.stop();
         self.return_snowballs();
         let direction = if direction < 0.0 { -1.0 } else { 1.0 };
         self.air.gust = Some(Gust { start: self.air.clock, direction, calm });

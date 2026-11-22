@@ -2100,6 +2100,300 @@ fn plough_scene(seed: u64, depth: f32) -> SnowSimulation {
 }
 
 #[test]
+fn a_yeti_kicks_a_ground_snowman_and_conserves_snow_at_every_frame_rate() {
+    use crate::yeti::YetiState;
+
+    for rate in [120, 60, 24] {
+        for x in [220.0, 1060.0] {
+            let dt = 1.0 / rate as f32;
+            let mut simulation = fight_scene(&[x]);
+            let area = simulation.snow_area();
+            let radius = simulation.snowmen()[0].radii[0];
+            let direction = if x < 640.0 { 1.0 } else { -1.0 };
+            simulation.send_yeti();
+            let entry = simulation.yeti().unwrap().x;
+            assert_eq!(simulation.yeti().unwrap().facing, direction);
+            assert_eq!(simulation.pace(), Pace::Lively);
+            assert!(!simulation.is_empty());
+            assert_eq!(simulation.sprite_count(), 0, "the Yeti is a quad, not a snow sprite");
+            assert!(simulation.snowball_at(V2::new(entry, 55.0)).is_none());
+            assert!(simulation.snowman_at(V2::new(entry, 55.0)).is_none());
+            let approach = ((x - entry).abs() - radius - 24.0) / 55.0;
+            let mut kicked = false;
+            let mut cheer_for = 0.0;
+            let mut left = false;
+            for frame in 1..30 * rate {
+                assert!(simulation.step(dt, AWAY), "every pose needs a redraw");
+                assert!((simulation.snow_area() - area).abs() < area * 0.0001, "the kick lost snow at {rate} Hz");
+                let time = frame as f32 * dt;
+                if !kicked && simulation.snowmen().is_empty() {
+                    kicked = true;
+                    assert!((time - (approach + 0.45 + 0.18)).abs() < dt + 0.005);
+                    let mut sprites = [Sprite::default(); 288];
+                    let count = simulation.write_sprites(&mut sprites);
+                    assert!(count > 0);
+                    assert!(sprites[..count].iter().all(|s| s.velocity.x * direction > 0.0 && s.velocity.y > 0.0));
+                }
+                let Some(yeti) = simulation.yeti() else {
+                    left = true;
+                    let expected = approach + 0.45 + 0.18 + 1.6 + approach * 55.0 / 65.0;
+                    assert!((time - expected).abs() < dt + 0.01);
+                    break;
+                };
+                assert_eq!(simulation.pace(), Pace::Lively);
+                match yeti.state {
+                    YetiState::WindingUp | YetiState::Kicking => {
+                        assert!((yeti.x - (x - direction * (radius + 24.0))).abs() < 0.01);
+                        assert!(!simulation.snowmen().is_empty(), "the Snowman must survive until contact");
+                    }
+                    YetiState::Cheering => cheer_for += dt,
+                    YetiState::Leaving => assert_eq!(yeti.facing, -direction),
+                    _ => {}
+                }
+            }
+            assert!(kicked && left);
+            assert!((cheer_for - 1.6).abs() < dt + 0.005);
+            settle_play(&mut simulation, area);
+            assert!((simulation.snow_area() - area).abs() < area * 0.0001);
+            assert_eq!(simulation.sprite_count(), 0, "all kick grains return to Piles");
+        }
+    }
+}
+
+#[test]
+fn a_yeti_gives_up_on_a_held_moved_ledge_or_missing_target_without_retargeting() {
+    use crate::yeti::{YetiState, YetiVisits};
+
+    let scene = fight_scene(&[220.0, 700.0]);
+    let original = [scene.snowmen()[0], scene.snowmen()[1]];
+    for rate in [120, 60, 24] {
+        let dt = 1.0 / rate as f32;
+        for phase in [YetiState::Arriving, YetiState::WindingUp, YetiState::Kicking] {
+            for rescue in 0..4 {
+                let mut men = original;
+                let mut visits = YetiVisits::new(crate::simulation::Random::seeded(42));
+                visits.send(&men, 1280.0);
+                while visits.running.as_ref().unwrap().state != phase {
+                    assert!(visits.advance(&men, 1280.0, dt).is_none());
+                }
+                match rescue {
+                    0 => men[0].state = SnowballState::Held,
+                    1 => men[0].center.x += 40.1,
+                    2 => men[0].state = SnowballState::Resting { on: Surface::Ledge(7) },
+                    _ => {}
+                }
+                let targets = if rescue == 3 { &men[1..] } else { &men[..] };
+                let area: f32 = targets.iter().map(crate::play::Snowman::area).sum();
+                assert!(visits.advance(targets, 1280.0, dt).is_none());
+                let stopped_at = visits.running.unwrap().x;
+                assert_eq!(visits.running.unwrap().state, YetiState::Confused);
+                let mut flips = 0;
+                let mut previous_facing = visits.running.unwrap().facing;
+                let mut looking_for = dt;
+                while visits.running.is_some_and(|yeti| yeti.state == YetiState::Confused) {
+                    assert!(visits.advance(targets, 1280.0, dt).is_none());
+                    if let Some(yeti) = visits.running
+                        && yeti.state == YetiState::Confused
+                    {
+                        assert_eq!(yeti.x, stopped_at);
+                        flips += usize::from(yeti.facing != previous_facing);
+                        previous_facing = yeti.facing;
+                    }
+                    looking_for += dt;
+                    assert!(looking_for < 3.2 + dt * 2.0);
+                }
+                assert!(flips >= 3);
+                assert!((looking_for - 3.2).abs() <= dt + 0.005);
+                let mut left = false;
+                for _ in 0..20 * rate {
+                    assert!(visits.advance(targets, 1280.0, dt).is_none());
+                    if visits.running.is_none() {
+                        left = true;
+                        break;
+                    }
+                }
+                assert!(left);
+                assert_eq!(targets.iter().map(crate::play::Snowman::area).sum::<f32>(), area);
+            }
+        }
+    }
+}
+
+#[test]
+fn grabbing_or_transferring_a_yeti_target_between_frames_still_saves_it() {
+    use crate::yeti::YetiState;
+
+    for transfer in [false, true] {
+        let mut simulation = fight_scene(&[220.0]);
+        let man = simulation.snowmen()[0];
+        let area = simulation.snow_area();
+        simulation.send_yeti();
+        while simulation.yeti().unwrap().state != YetiState::WindingUp {
+            simulation.step(DT, AWAY);
+        }
+        if transfer {
+            let man = simulation.take_snowman(man.id).unwrap();
+            simulation.bring_snowman(man);
+        } else {
+            assert!(simulation.grab(man.id, man.center));
+            simulation.release(V2::ZERO);
+        }
+        assert_eq!(simulation.yeti().unwrap().state, YetiState::Confused);
+        run(&mut simulation, 20.0, AWAY);
+        assert!(simulation.yeti().is_none());
+        assert_eq!(simulation.snowmen().len(), 1);
+        assert!((simulation.snow_area() - area).abs() < 0.01);
+    }
+}
+
+#[test]
+fn a_yeti_tolerates_forty_points_of_movement_and_chooses_the_nearest_ground_target() {
+    use crate::yeti::YetiVisits;
+
+    let mut scene = fight_scene(&[220.0, 700.0, 1000.0]);
+    let mut men = [scene.snowmen()[0], scene.snowmen()[1], scene.snowmen()[2]];
+    men[0].state = SnowballState::Resting { on: Surface::Ledge(7) };
+    let mut visits = YetiVisits::new(crate::simulation::Random::seeded(42));
+    visits.send(&men, 1280.0);
+    assert_eq!(visits.running.unwrap().facing, -1.0, "the closer left target is safely on a Ledge");
+    men[2].center.x -= 40.0;
+    let mut kicked = None;
+    for _ in 0..1200 {
+        kicked = kicked.or(visits.advance(&men, 1280.0, DT));
+    }
+    assert_eq!(kicked, Some((men[2].id, -1.0)));
+    // Secondary screens have their own Ground and may be called directly by the app's fallback.
+    scene.set_main_screen(false);
+    scene.send_yeti();
+    assert!(scene.yeti().is_some());
+}
+
+#[test]
+fn yetis_never_spawn_without_a_ground_snowman_even_over_many_random_hours() {
+    use crate::yeti::YetiVisits;
+
+    for ledge_only in [false, true] {
+        let mut simulation = bare_play();
+        if ledge_only {
+            simulation.update_windows(&[surface(7, 100.0, 300.0, 1000.0)], DT, &HashSet::new(), &HashSet::new(), false);
+            build_snowman(&mut simulation, 300.0);
+        }
+        assert!(!simulation.has_ground_snowman());
+        simulation.send_yeti();
+        assert!(simulation.yeti().is_none());
+        let mut visits = YetiVisits::new(crate::simulation::Random::seeded(42));
+        for _ in 0..6000 {
+            visits.wait(simulation.snowmen(), 1280.0, 60.0);
+            visits.send(simulation.snowmen(), 1280.0);
+            assert!(visits.running.is_none());
+        }
+    }
+}
+
+#[test]
+fn random_yeti_visits_average_about_an_hour_and_never_overlap() {
+    use crate::yeti::YetiVisits;
+
+    let scene = fight_scene(&[220.0]);
+    let mut visits = YetiVisits::new(crate::simulation::Random::seeded(42));
+    visits.seed_random(0x4d59_5df4_d0f3_3173);
+    let mut starts = 0;
+    let mut previous_start = 0;
+    let mut previous_end = None;
+    let mut intervals = 0;
+    for second in 1..=360 * 3600 {
+        let active = visits.running.is_some();
+        visits.wait(scene.snowmen(), 1280.0, 1.0);
+        if !active && visits.running.is_some() {
+            if let Some(ended) = previous_end {
+                assert!(second - ended >= 20 * 60);
+            }
+            if starts > 0 {
+                intervals += second - previous_start;
+            }
+            starts += 1;
+            previous_start = second;
+        }
+        if let Some(yeti) = visits.running {
+            visits.send(scene.snowmen(), 1280.0);
+            assert_eq!(visits.running.unwrap().elapsed, yeti.elapsed, "sending cannot replace an active visitor");
+            assert_eq!(visits.running.unwrap().x, yeti.x);
+            visits.advance(scene.snowmen(), 1280.0, 1.0);
+            if visits.running.is_none() {
+                previous_end = Some(second);
+            }
+        }
+    }
+    assert!(starts > 100);
+    let mean_minutes = intervals as f64 / (starts - 1) as f64 / 60.0;
+    assert!((40.0..120.0).contains(&mean_minutes), "mean interval {mean_minutes} minutes over {starts} visits");
+}
+
+#[test]
+fn stopping_or_clearing_snow_removes_the_yeti_and_manual_visits_bypass_cooldown() {
+    use crate::yeti::YetiVisits;
+
+    let scene = fight_scene(&[220.0]);
+    let mut visits = YetiVisits::new(crate::simulation::Random::seeded(42));
+
+    visits.send(scene.snowmen(), 1280.0);
+    visits.stop();
+    assert!(visits.running.is_none());
+    visits.wait(scene.snowmen(), 1280.0, 1199.0);
+    assert!(visits.running.is_none());
+    visits.send(scene.snowmen(), 1280.0);
+    assert!(visits.running.is_some());
+    for calm in [false, true] {
+        let mut simulation = fight_scene(&[220.0]);
+        simulation.send_yeti();
+        simulation.step(DT, AWAY);
+        assert!(simulation.yeti().is_some());
+        simulation.blow_away(1.0, calm);
+        assert!(simulation.yeti().is_none());
+        simulation.send_yeti();
+        assert!(simulation.yeti().is_none(), "Clear snow cannot be interrupted by a visit");
+    }
+}
+
+#[test]
+fn a_yeti_uses_only_simulation_time_and_keeps_an_empty_overlay_awake_until_it_leaves() {
+    use crate::yeti::YetiState;
+
+    let mut simulation = fight_scene(&[220.0]);
+    simulation.send_yeti();
+    run(&mut simulation, 2.0, AWAY);
+    let man = simulation.take_snowman(simulation.snowmen()[0].id).unwrap();
+    assert!(!simulation.has_snow());
+    assert_eq!(simulation.sprite_count(), 0);
+    assert!(!simulation.is_empty(), "the confused visitor still needs its quad");
+    assert_eq!(simulation.yeti().unwrap().state, YetiState::Confused);
+    // Pause/hide stops Screen::frame. A zero-time step also cannot advance any pose,
+    // so resuming never has a wall-clock timer that can land the kick while hidden.
+    let frozen = *simulation.yeti().unwrap();
+    for _ in 0..60 {
+        simulation.step(0.0, AWAY);
+        let yeti = simulation.yeti().unwrap();
+        assert_eq!((yeti.x, yeti.state, yeti.state_time, yeti.elapsed), (frozen.x, frozen.state, frozen.state_time, frozen.elapsed));
+        assert_eq!(simulation.pace(), Pace::Lively);
+    }
+    let mut left = false;
+    for _ in 0..600 {
+        let changed = simulation.step(DT, AWAY);
+        if simulation.yeti().is_none() {
+            assert!(changed, "the departing quad must be erased even when there are no snow sprites");
+            left = true;
+            break;
+        }
+        assert!(changed);
+        assert_eq!(simulation.pace(), Pace::Lively);
+    }
+    assert!(left);
+    assert!(simulation.is_empty());
+    assert!(!simulation.step(DT, AWAY));
+    assert_eq!(man.surface(), Some(Surface::Ground));
+}
+
+#[test]
 fn snowplough_kinds_and_directions_are_chosen_separately() {
     for (seed, direction, kind) in
         [(1, 1.0, PloughKind::Blade), (1 << 33, -1.0, PloughKind::Blade), (2 << 33, 1.0, PloughKind::Blower), (3 << 33, -1.0, PloughKind::Blower)]

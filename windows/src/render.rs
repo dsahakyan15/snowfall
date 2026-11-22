@@ -82,6 +82,8 @@ pub struct Gpu {
     pile_fragment: ID3D11PixelShader,
     plough_vertex: ID3D11VertexShader,
     plough_fragment: ID3D11PixelShader,
+    yeti_vertex: ID3D11VertexShader,
+    yeti_fragment: ID3D11PixelShader,
     blend: ID3D11BlendState,
     raster: ID3D11RasterizerState,
     uniforms: ID3D11Buffer,
@@ -121,6 +123,8 @@ impl Gpu {
             let pile_fragment = pixel_shader(&device, &compile(s!("pileFragment"), s!("ps_4_0"))?)?;
             let plough_vertex = vertex_shader(&device, &compile(s!("ploughVertex"), s!("vs_4_0"))?)?;
             let plough_fragment = pixel_shader(&device, &compile(s!("ploughFragment"), s!("ps_4_0"))?)?;
+            let yeti_vertex = vertex_shader(&device, &compile(s!("yetiVertex"), s!("vs_4_0"))?)?;
+            let yeti_fragment = pixel_shader(&device, &compile(s!("yetiFragment"), s!("ps_4_0"))?)?;
 
             let element = |name: PCSTR, format: DXGI_FORMAT, offset: u32| D3D11_INPUT_ELEMENT_DESC {
                 SemanticName: name,
@@ -179,6 +183,8 @@ impl Gpu {
                 pile_fragment,
                 plough_vertex,
                 plough_fragment,
+                yeti_vertex,
+                yeti_fragment,
                 blend: blend.ok_or_else(Error::empty)?,
                 raster: raster.ok_or_else(Error::empty)?,
                 uniforms,
@@ -399,6 +405,20 @@ impl Surface {
                 context.PSSetShader(&gpu.plough_fragment, None);
                 context.Draw(4, 0);
             }
+            if let Some(yeti) = simulation.yeti() {
+                // One quad with the same Ground origin as the Snowplough. columnCount is
+                // YetiState, pileTop is facing, pileBottom is pose seconds, time is visit seconds.
+                uniforms.origin = [yeti.x, 1.5];
+                uniforms.pile_top = yeti.facing;
+                uniforms.pile_bottom = yeti.state_time;
+                uniforms.column_count = yeti.state as i32;
+                uniforms.time = yeti.elapsed;
+                gpu.write(&gpu.uniforms, &uniforms)?;
+                context.IASetInputLayout(None);
+                context.VSSetShader(&gpu.yeti_vertex, None);
+                context.PSSetShader(&gpu.yeti_fragment, None);
+                context.Draw(4, 0);
+            }
             if spill > 0 {
                 uniforms.occluder_count = 0;
                 uniforms.time = time;
@@ -476,6 +496,8 @@ mod tests {
             (s!("pileFragment"), s!("ps_4_0")),
             (s!("ploughVertex"), s!("vs_4_0")),
             (s!("ploughFragment"), s!("ps_4_0")),
+            (s!("yetiVertex"), s!("vs_4_0")),
+            (s!("yetiFragment"), s!("ps_4_0")),
         ] {
             compile(entry, target).expect("the shader must compile on supported D3D11 devices");
         }
