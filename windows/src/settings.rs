@@ -11,6 +11,27 @@ pub use snowfall_core::simulation::Snowfall as Level;
 /// Which way, and how hard, the wind blows: the engine's own winds.
 pub use snowfall_core::simulation::Wind;
 
+/// Only the settings window follows this preference; the snow keeps its own appearance.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WindowTheme {
+    #[default]
+    Auto,
+    Light,
+    Dark,
+}
+
+impl WindowTheme {
+    pub const ALL: [Self; 3] = [Self::Auto, Self::Light, Self::Dark];
+
+    pub fn dark(self, system_dark: bool) -> bool {
+        match self {
+            Self::Auto => system_dark,
+            Self::Light => false,
+            Self::Dark => true,
+        }
+    }
+}
+
 /// How opaque falling snow and Snowballs are, in percent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Opacity(u8);
@@ -23,7 +44,7 @@ impl Opacity {
     }
 }
 
-/// The settings, as the tray menu shows them.
+/// The app settings, shared by the tray menu and settings window.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
     pub level: Level,
@@ -40,6 +61,7 @@ pub struct Settings {
     pub show_over_full_screen: bool,
     pub show_in_screenshots: bool,
     pub open_at_login: bool,
+    pub window_theme: WindowTheme,
 }
 
 impl Default for Settings {
@@ -58,6 +80,7 @@ impl Default for Settings {
             show_over_full_screen: false,
             show_in_screenshots: false,
             open_at_login: true,
+            window_theme: WindowTheme::Auto,
         }
     }
 }
@@ -79,6 +102,7 @@ pub enum Change {
     ShowOverFullScreen(bool),
     ShowInScreenshots(bool),
     OpenAtLogin(bool),
+    WindowTheme(WindowTheme),
 }
 
 impl Settings {
@@ -102,6 +126,7 @@ impl Settings {
             Change::ShowOverFullScreen(on) => self.show_over_full_screen = on,
             Change::ShowInScreenshots(on) => self.show_in_screenshots = on,
             Change::OpenAtLogin(on) => self.open_at_login = on,
+            Change::WindowTheme(theme) => self.window_theme = theme,
         }
     }
 
@@ -130,6 +155,11 @@ impl Settings {
             show_over_full_screen: flag("showOverFullScreen", defaults.show_over_full_screen),
             show_in_screenshots: flag("showInScreenshots", defaults.show_in_screenshots),
             open_at_login: flag("openAtLogin", defaults.open_at_login),
+            window_theme: match store.number("windowTheme") {
+                Some(1) => WindowTheme::Light,
+                Some(2) => WindowTheme::Dark,
+                _ => WindowTheme::Auto,
+            },
         }
     }
 
@@ -147,6 +177,14 @@ impl Settings {
         store.set_number("showOverFullScreen", self.show_over_full_screen as u32);
         store.set_number("showInScreenshots", self.show_in_screenshots as u32);
         store.set_number("openAtLogin", self.open_at_login as u32);
+        store.set_number(
+            "windowTheme",
+            match self.window_theme {
+                WindowTheme::Auto => 0,
+                WindowTheme::Light => 1,
+                WindowTheme::Dark => 2,
+            },
+        );
     }
 }
 
@@ -256,6 +294,7 @@ mod tests {
             show_over_full_screen: true,
             show_in_screenshots: true,
             open_at_login: false,
+            window_theme: WindowTheme::Dark,
         };
         let mut store = MemoryStore::default();
         changed.save(&mut store);
@@ -283,5 +322,22 @@ mod tests {
         assert!(settings.screen_on("B"));
         settings.apply(&Change::Screen("A".into(), true));
         assert!(settings.screen_on("A"));
+    }
+
+    #[test]
+    fn window_theme_defaults_round_trips_and_resolves_the_system_theme() {
+        let mut store = MemoryStore::default();
+        assert_eq!(Settings::load(&store).window_theme, WindowTheme::Auto);
+        for (code, theme) in WindowTheme::ALL.into_iter().enumerate() {
+            let mut settings = Settings::default();
+            settings.apply(&Change::WindowTheme(theme));
+            settings.save(&mut store);
+            assert_eq!(store.number("windowTheme"), Some(code as u32));
+            assert_eq!(Settings::load(&store).window_theme, theme);
+            assert_eq!(theme.dark(false), theme == WindowTheme::Dark);
+            assert_eq!(theme.dark(true), theme != WindowTheme::Light);
+        }
+        store.set_number("windowTheme", 99);
+        assert_eq!(Settings::load(&store).window_theme, WindowTheme::Auto);
     }
 }

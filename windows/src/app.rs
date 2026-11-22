@@ -27,6 +27,7 @@ use crate::menu::{self, Action, Context, Item};
 use crate::registry::{self, Registry};
 use crate::screen;
 use crate::settings::{Change, Settings, Store};
+use crate::settings_window_native;
 use crate::snow::{self, Command, Links};
 use crate::strings::Language;
 use crate::update as releases;
@@ -173,10 +174,13 @@ unsafe extern "system" fn procedure(window: HWND, message: u32, wparam: WPARAM, 
     match message {
         WM_TRAY => {
             let event = (lparam.0 & 0xffff) as u32;
-            if event == WM_CONTEXTMENU || event == NIN_SELECT || event == NIN_KEYSELECT {
+            if event == WM_CONTEXTMENU {
                 let x = (wparam.0 & 0xffff) as i16 as i32;
                 let y = ((wparam.0 >> 16) & 0xffff) as i16 as i32;
                 show_menu(window, x, y);
+            } else if event == NIN_SELECT || event == NIN_KEYSELECT {
+                // A click on the icon opens the settings window; the menu stays on right-click.
+                choose(window, Action::OpenSnowfall);
             } else if event == NIN_BALLOONUSERCLICK {
                 open_release_page();
             }
@@ -228,7 +232,12 @@ unsafe extern "system" fn procedure(window: HWND, message: u32, wparam: WPARAM, 
         }
         WM_SETTINGCHANGE => {
             refresh_icon(window);
+            settings_window_native::refresh_theme();
             unsafe { DefWindowProcW(window, message, wparam, lparam) }
+        }
+        WM_DISPLAYCHANGE => {
+            refresh_settings_window();
+            LRESULT(0)
         }
         _ if message != 0 && message == TASKBAR_CREATED.load(Ordering::Relaxed) => {
             APP.with_borrow(|app| {
@@ -320,8 +329,22 @@ fn native_menu(items: &[Item], actions: &mut Vec<Action>) -> Option<HMENU> {
     }
 }
 
-fn choose(window: HWND, action: Action) {
+pub(crate) fn choose(window: HWND, action: Action) {
     match action {
+        Action::OpenSnowfall => {
+            let settings = APP.with_borrow(|app| app.as_ref().map(|app| app.settings.clone()));
+            if let Some(settings) = settings {
+                let screens = menu_screens();
+                let context = Context {
+                    language: Language::from_langid(unsafe { GetUserDefaultUILanguage() }),
+                    version: env!("CARGO_PKG_VERSION"),
+                    screens: &screens,
+                };
+                if let Err(error) = settings_window_native::open(window, &settings, &context) {
+                    log!("settings window: {error}");
+                }
+            }
+        }
         Action::Quit => quit(window),
         Action::CheckForUpdates => check_for_updates(window, true),
         Action::SendSnowplough => APP.with_borrow(|app| {
@@ -353,6 +376,25 @@ fn choose(window: HWND, action: Action) {
             send(app, Command::Settings(app.settings.clone()));
         }),
     }
+    refresh_settings_window();
+}
+
+/// Both entry points write through choose(); the open window then projects the saved state again.
+fn refresh_settings_window() {
+    if !settings_window_native::is_open() {
+        return;
+    }
+    if let Some(settings) = APP.with_borrow(|app| app.as_ref().map(|app| app.settings.clone())) {
+        let screens = menu_screens();
+        settings_window_native::refresh(
+            &settings,
+            &Context {
+                language: Language::from_langid(unsafe { GetUserDefaultUILanguage() }),
+                version: env!("CARGO_PKG_VERSION"),
+                screens: &screens,
+            },
+        );
+    }
 }
 
 /// The "Animation effects" setting: off means the person prefers less motion.
@@ -365,6 +407,7 @@ fn animations_enabled() -> bool {
 }
 
 fn quit(window: HWND) {
+    settings_window_native::close();
     remove_tray_icon(window);
     if let Some(mut app) = APP.with_borrow_mut(Option::take) {
         send(&app, Command::Quit);

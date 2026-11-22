@@ -6,6 +6,7 @@ use crate::strings::{Language, Strings};
 /// What choosing a menu item does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
+    OpenSnowfall,
     Change(Change),
     ClearSnow,
     SendSnowplough,
@@ -61,6 +62,8 @@ pub fn build(settings: &Settings, context: &Context) -> Vec<Item> {
     };
     let behind = settings.behind_windows;
     vec![
+        command(text.open_snowfall, Action::OpenSnowfall, true),
+        Item::Separator,
         submenu(text.snowfall, true, choices(&Level::ALL, settings.level, |level| level_label(text, level), Change::Level)),
         submenu(text.wind, true, choices(&Wind::ALL, settings.wind, |wind| wind_label(text, wind), Change::Wind)),
         submenu(text.screens, true, screens(settings, context, text)),
@@ -196,6 +199,7 @@ mod tests {
         assert_eq!(
             labels(&menu),
             [
+                "Open Snowfall…",
                 "Snowfall",
                 "Wind",
                 "Screens",
@@ -226,7 +230,7 @@ mod tests {
         assert!(labels.contains(&"Чистить панель задач"));
         assert!(labels.contains(&"Вызвать снегоочиститель"));
         assert!(labels.contains(&"Позвать йети"));
-        assert_eq!(labels[0], "Снегопад");
+        assert_eq!(labels[0], "Открыть Snowfall…");
         assert_eq!(labels.last(), Some(&"Выход"));
         assert!(labels.iter().all(|label| !label.contains("Quit")));
     }

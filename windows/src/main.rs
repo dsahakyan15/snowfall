@@ -12,6 +12,8 @@ mod registry;
 mod render;
 mod screen;
 mod settings;
+mod settings_window;
+mod settings_window_native;
 mod snow;
 mod strings;
 mod tracker;
